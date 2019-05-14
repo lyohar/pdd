@@ -1,0 +1,1 @@
+bin/pdd_server -p 30103 -l log.txt -a 64
