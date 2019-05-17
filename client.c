@@ -101,11 +101,6 @@ static int pdd_connect(args_t args)
         return -1;
     }
 
-    if (make_socket_non_blocking(client_sock)) {
-        fprintf(stderr, "could not make socket non-blocking\n");
-	return -1;
-    }
-
     return client_sock;
 }	
 

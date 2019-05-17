@@ -49,20 +49,4 @@ static inline void finish_timing(const struct timespec *begin_time, struct times
     *duration_r = duration;
 }
 
-static inline int make_socket_non_blocking (int fd)
-{
-    int flags = fcntl (fd, F_GETFL, 0);
-    if (flags == -1) {
-        fprintf(stderr, "Failed to get socket flags: %s\n", strerror(errno));
-        return -1;
-    }
-    if (fcntl (fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        fprintf(stderr, "Failed to set socket flags: %s\n", strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-
-
-
 #endif

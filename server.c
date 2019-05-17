@@ -59,6 +59,19 @@ typedef struct service_t {
     int verbose;
 } service_t;
 
+static inline int make_socket_non_blocking (int fd)
+{
+    int flags = fcntl (fd, F_GETFL, 0);
+    if (flags == -1) {
+        fprintf(stderr, "Failed to get socket flags: %s\n", strerror(errno));
+        return -1;
+    }
+    if (fcntl (fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        fprintf(stderr, "Failed to set socket flags: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
 static inline void timespec_add_msec(struct timespec *tm, int msec)
 {
     tm->tv_sec += msec/1000;
