@@ -545,13 +545,14 @@ static int run_server(const args_t *args, int term_fd)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -l LOG_FILENAME -p PORT -a AVAILABLE_SLOTS [-h HOST] [-v]\n", app);
+    fprintf(stderr, "Usage: %s -l LOG_FILENAME -e ERROR_LOG_FILENAME -p PORT -a AVAILABLE_SLOTS [-h HOST] [-v]\n", app);
     fprintf(stderr, "\n");
-    fprintf(stderr, "  -l LOG_FILENAME      set log filename\n");
-    fprintf(stderr, "  -p PORT              set port\n");
-    fprintf(stderr, "  -a AVAILABLE_SLOTS   specifies total number of available slots in range [1..%d]\n", (int) MAX_SLOT_COUNT);
-    fprintf(stderr, "  -h HOST              set host\n");
-    fprintf(stderr, "  -v                   switch verbose mode\n");
+    fprintf(stderr, "  -l LOG_FILENAME          set log filename\n");
+    fprintf(stderr, "  -e LOG_ERROR_FILENAME    set error log filename\n");
+    fprintf(stderr, "  -p PORT                  set port\n");
+    fprintf(stderr, "  -a AVAILABLE_SLOTS       specifies total number of available slots in range [1..%d]\n", (int) MAX_SLOT_COUNT);
+    fprintf(stderr, "  -h HOST                  set host\n");
+    fprintf(stderr, "  -v                       switch verbose mode\n");
 }
 
 
@@ -612,7 +613,7 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	return -1;
     }
     if (!args->error_log_file_name) {
-	fprintf(stderr, "Missing mandatory log filename option\n");
+	fprintf(stderr, "Missing mandatory error log filename option\n");
 	return -1;
     }
     if (args->slots <= 0) {
