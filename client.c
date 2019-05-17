@@ -31,7 +31,8 @@ typedef struct args_t {
 } args_t;
 
 
-static inline int send_all(int sock, void* data, size_t len) {
+static inline int send_all(int sock, const void* data, size_t len)
+{
     while (len) {
 	ssize_t n = write(sock, data, len);
 	if (n <= 0)
@@ -44,7 +45,8 @@ static inline int send_all(int sock, void* data, size_t len) {
     return 0;
 }
 
-static inline int recv_all(int sock, void* data, size_t len) {
+static inline int recv_all(int sock, void* data, size_t len)
+{
     size_t bytes_left = len;
     size_t total_processed = 0;
     ssize_t bytes_processed = 0;
@@ -66,7 +68,16 @@ static inline int recv_all(int sock, void* data, size_t len) {
         return -1;
     return 0;
 }
-
+static int send_log_message(int client_sock, const char *message, uint16_t len, int type)
+{
+    char op = type;
+    uint16_t length = htons(len);
+    if (send_all(client_sock, &op, sizeof(char)) ||
+	send_all(client_sock, &length, sizeof(uint16_t)) ||
+	send_all(client_sock, message, len))
+	return -1;
+    return 0;
+}
 static int pdd_connect(args_t args)
 {
     int client_sock;
@@ -139,8 +150,7 @@ static int decompress_file(args_t args)
     // communication variables
     char op;
     unsigned short length;
-    size_t max_log_message_size = 2048;
-    char msg[max_log_message_size];
+    char msg[2048];
 
     // zero slots metrics
     size_t zero_slot_retries = 0;
@@ -196,17 +206,11 @@ static int decompress_file(args_t args)
                 zero_slot_reads += 1;
                 zero_slot_retries = 0;
 		
-		// TODO: Log message for this
-		fprintf(stderr, "file: %s, maximum retries exceeded, will read anyway%c", args.input_file_name, 0);
-			  
-		/* { */
-		/*   op = 'i'; */
-		/*   length = snprintf(msg, max_log_message_size, "file: %s, maximum retries exceeded, will read anyway%c", args.input_file_name, 0); */
-		/*   length = htons(length); */
-		/*   send_all(client_sock, &op, sizeof(op)); */
-		/*   send_all(client_sock, &length, sizeof(length)); */
-		/*   send_all(client_sock, msg, ntohs(length)); */
-		/* } */
+		length = snprintf(msg, sizeof(msg), "file: %s, maximum retries exceeded, will read anyway", args.input_file_name);
+		if (send_log_message(client_sock, msg, length, 'e')) {
+		    fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
+		    return 1;
+		}
             } else {
                 sleep(2);
                 continue;
@@ -216,7 +220,10 @@ static int decompress_file(args_t args)
 	{
 	    struct timespec begin_time;
 	    start_timing(&begin_time);
-	    s.avail_in = fread(read_buf, 1, args.read_buffer_size, in);
+	    if (!(s.avail_in = fread(read_buf, 1, args.read_buffer_size, in))) {
+		fprintf(stderr, "Unexpected EOF from input file: archive not finished\n");
+		return 1;
+	    }
 	    finish_timing(&begin_time, &read_duration);
 	}
 
@@ -226,16 +233,14 @@ static int decompress_file(args_t args)
             send_all(client_sock, &op, sizeof(op));
 	    recv_all(client_sock, &response, sizeof(uint8_t));
             length = response;
-	    fprintf(stderr, "Sent\n");
+	    if (args.verbose)
+		fprintf(stderr, "Sent\n");
         } else {
-	  fprintf(stderr, "file: %s, finished read by zero slot%c", args.input_file_name, 0);
-	  // TODO: Log message for this
-	  /* op = 'i'; */
-          /*   length = snprintf(msg, max_log_message_size, "file: %s, finished read by zero slot%c", args.input_file_name, 0); */
-          /*   length = htons(length); */
-          /*   send_all(client_sock, &op, sizeof(op)); */
-          /*   send_all(client_sock, &length, sizeof(length)); */
-          /*   send_all(client_sock, msg, ntohs(length)); */
+            length = snprintf(msg, sizeof(msg), "file: %s, finished read by zero slot", args.input_file_name);
+	    if (send_log_message(client_sock, msg, length, 'e')) {
+		fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
+		return 1;
+	    }
         }
 
         s.next_in = read_buf;
@@ -276,16 +281,16 @@ static int decompress_file(args_t args)
         }
     }
 
-    op = 'l';
-    length = snprintf(msg, max_log_message_size, "%s|%lld.%09d|%lld.%09d|%lld.%09d|%d|%d%c", args.input_file_name,
+
+    length = snprintf(msg, sizeof(msg), "%s|%lld.%09d|%lld.%09d|%lld.%09d|%d|%d", args.input_file_name,
 		      (long long int) read_duration.tv_sec, (int) read_duration.tv_nsec,
 		      (long long int) decomp_duration.tv_sec, (int) decomp_duration.tv_nsec,
 		      (long long int) write_duration.tv_sec, (int) write_duration.tv_nsec,
-		      (int) zero_slot_reads, (int) total_zero_slot_retries, 0);
-    length = htons(length);
-    send_all(client_sock, &op, sizeof(op));
-    send_all(client_sock, &length, sizeof(length));
-    send_all(client_sock, msg, ntohs(length));
+		      (int) zero_slot_reads, (int) total_zero_slot_retries);
+    if (send_log_message(client_sock, msg, length, 'l')) {
+	fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
+	return 1;
+    }
 
     close(client_sock);
     deflateEnd(&s); free(read_buf); free(decomp_buf); fclose(in);
