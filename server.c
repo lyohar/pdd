@@ -279,11 +279,11 @@ static int service_init(service_t *service, const args_t *args, int term_fd)
 }
 static void service_uninit(service_t *service)
 {
+    service_clear_clients(service);
     close(service->epoll_fd);
     close(service->service_socket_fd);
     fclose(service->log_fh);
     fclose(service->error_log_fh);
-    service_clear_clients(service);
 }
 static inline void service_log(service_t *service, const char *message, size_t len)
 {
