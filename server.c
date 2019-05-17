@@ -25,14 +25,16 @@
 
 typedef struct args_t {
     char verbose;
-    const char *host_name; 
+    const char *host_name;
     int port_number;
     int slots;
-    const char *log_file_name;    
+    const char *log_file_name;
+    const char *error_log_file_name;
     int term_fd;
 } args_t;
 
-#define CLIENT_BUFFER_SIZE 768
+#define CLIENT_MESSAGE_SIZE 2048
+#define CLIENT_BUFFER_SIZE 2176
 typedef struct client_t {
     int fd;
     int timer_fd;
@@ -48,11 +50,13 @@ typedef struct client_t {
 typedef struct service_t {
     int epoll_fd;
     FILE *log_fh;
+    FILE *error_log_fh;
     int max_free_slots;
     int free_slots;
     int service_socket_fd;
     client_t client_list;
     client_t term_fd_client;
+    int verbose;
 } service_t;
 
 static inline void timespec_add_msec(struct timespec *tm, int msec)
@@ -81,13 +85,14 @@ static client_t *service_add_client(service_t *service, int fd)
 	struct epoll_event event;
 	event.data.ptr = client;
 	event.events = EPOLLIN;
-	if (epoll_ctl (service->epoll_fd, EPOLL_CTL_ADD, fd, &event) != -1) {
+	if (epoll_ctl(service->epoll_fd, EPOLL_CTL_ADD, fd, &event) != -1) {
 	    client->fd = fd;
 	    if ((client->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK)) != -1) {
-		event.data.ptr = ((void*) client) + 1;
+		event.data.ptr = ((void *) client) + 1;
 		event.events = EPOLLIN;
-		if (epoll_ctl (service->epoll_fd, EPOLL_CTL_ADD, client->timer_fd, &event) != -1) {
+		if (epoll_ctl(service->epoll_fd, EPOLL_CTL_ADD, client->timer_fd, &event) != -1) {
 		    client->slot_reserved = 0;
+		    client->slot_requested = 0;
 		    client->buffer_off = 0;
 		    client->prev = service->client_list.prev;
 		    service->client_list.prev->next = client;
@@ -101,6 +106,7 @@ static client_t *service_add_client(service_t *service, int fd)
 	    } else {
 		fprintf(stderr, "Failed to create timer FD: %s\n", strerror(errno));
 	    }
+	    epoll_ctl(service->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
 	} else {
 	    fprintf(stderr, "Failed to add client to epoll: %s\n", strerror(errno));
 	}
@@ -108,14 +114,34 @@ static client_t *service_add_client(service_t *service, int fd)
     }
     return NULL;
 }
+static int service_reserve_slot(service_t *service, client_t *client)
+{
+    if (client->slot_reserved || (service->free_slots <= 0))
+	return 0;
+
+    client->slot_reserved = 1;
+    service->free_slots--;
+    return 1;
+}
+static int service_release_slot(service_t *service, client_t *client)
+{
+    if (!client->slot_reserved)
+	return 0;
+
+    client->slot_reserved = 0;
+    service->free_slots++;
+    return 1;
+}
 static void service_drop_client(service_t *service, client_t *client)
 {
-    if (client->slot_reserved) {
-	client->slot_reserved = 0;
-	service->free_slots++;
+    if (service_release_slot(service, client)) {
+	if (service->verbose)
+	    fprintf(stderr, "Slot released (%d slots free now)\n", service->free_slots);
     }
     if (epoll_ctl(service->epoll_fd, EPOLL_CTL_DEL, client->fd, NULL))
-	fprintf(stderr, "Failed to delete entry from epoll structure: %s\n", strerror(errno));
+	fprintf(stderr, "Failed to delete entry %d from epoll structure: %s\n", client->fd, strerror(errno));
+    if (epoll_ctl(service->epoll_fd, EPOLL_CTL_DEL, client->timer_fd, NULL))
+	fprintf(stderr, "Failed to delete entry %d from epoll structure: %s\n", client->timer_fd, strerror(errno));
     close(client->fd);
     close(client->timer_fd);
     client->prev->next = client->next;
@@ -218,22 +244,28 @@ static int service_init(service_t *service, const args_t *args, int term_fd)
 	service->service_socket_fd = -1;
 	service->term_fd_client.fd = term_fd;
 	if ((service->log_fh = fopen(args->log_file_name, "a"))) {
-	    if ((service->service_socket_fd = start_listening(args->host_name, args->port_number)) != -1) {
-		struct epoll_event event;
-		event.data.ptr = &service->client_list;
-		event.events = EPOLLIN;
-		if (epoll_ctl(service->epoll_fd, EPOLL_CTL_ADD, service->service_socket_fd, &event) != -1) {
-		    event.data.ptr = &service->term_fd_client;
+	    if ((service->error_log_fh = fopen(args->error_log_file_name, "a"))) {
+		if ((service->service_socket_fd = start_listening(args->host_name, args->port_number)) != -1) {
+		    struct epoll_event event;
+		    event.data.ptr = &service->client_list;
 		    event.events = EPOLLIN;
-		    if (epoll_ctl(service->epoll_fd, EPOLL_CTL_ADD, service->term_fd_client.fd, &event) != -1) {
-			init_client_list(&service->client_list, service->service_socket_fd);
-			return 0;
+		    if (epoll_ctl(service->epoll_fd, EPOLL_CTL_ADD, service->service_socket_fd, &event) != -1) {
+			event.data.ptr = &service->term_fd_client;
+			event.events = EPOLLIN;
+			if (epoll_ctl(service->epoll_fd, EPOLL_CTL_ADD, service->term_fd_client.fd, &event) != -1) {
+			    init_client_list(&service->client_list, service->service_socket_fd);
+			    service->verbose = args->verbose;
+			    return 0;
+			} else {
+			    fprintf(stderr, "Failed to add termination event FD to epoll: %s\n", strerror(errno));
+			}
 		    } else {
-			fprintf(stderr, "Failed to add termination event FD to epoll: %s\n", strerror(errno));
+			fprintf(stderr, "Failed to add server socket to epoll: %s\n", strerror(errno));
 		    }
-		} else {
-		    fprintf(stderr, "Failed to add server socket to epoll: %s\n", strerror(errno));
 		}
+		fclose(service->error_log_fh);
+	    } else {
+		fprintf(stderr, "Failed to open error log file '%s' for writing: %s\n", args->error_log_file_name, strerror(errno));
 	    }
 	    fclose(service->log_fh);
 	} else {
@@ -250,29 +282,53 @@ static void service_uninit(service_t *service)
     close(service->epoll_fd);
     close(service->service_socket_fd);
     fclose(service->log_fh);
+    fclose(service->error_log_fh);
     service_clear_clients(service);
 }
 static inline void service_log(service_t *service, const char *message, size_t len)
 {
     struct timespec now;
     struct tm now_tm;
-    char buffer[512];
+    char buffer[256];
     *buffer = '\0';
     if (!clock_gettime(CLOCK_REALTIME, &now) && gmtime_r(&now.tv_sec, &now_tm))
 	buffer[strftime(buffer, sizeof(buffer) - 1, "%F %T", &now_tm)] = '\0';
     fprintf(service->log_fh, "%s.%09d|%.*s\n", buffer, (int) now.tv_nsec, (int) len, message);
     fflush(service->log_fh);
 }
+static inline void service_log_error(service_t *service, const char *message, size_t len)
+{
+    struct timespec now;
+    struct tm now_tm;
+    char buffer[256];
+    *buffer = '\0';
+    if (!clock_gettime(CLOCK_REALTIME, &now) && gmtime_r(&now.tv_sec, &now_tm))
+	buffer[strftime(buffer, sizeof(buffer) - 1, "%F %T", &now_tm)] = '\0';
+    fprintf(service->error_log_fh, "%s.%09d|%.*s\n", buffer, (int) now.tv_nsec, (int) len, message);
+    fflush(service->error_log_fh);
+}
 static void service_give_free_slots(service_t *service, int one)
 {
     client_t *client = service->client_list.next;
     while ((service->free_slots > 0) && (client != &service->client_list)) {
 	if (client->slot_requested) {
-	    client->slot_reserved = 1;
 	    client->slot_requested = 0;
+	    service_reserve_slot(service, client);
+	    if (service->verbose)
+		fprintf(stderr, "Slot reserved (%d slots free now)\n", service->free_slots);
 	    uint8_t response = 1;
+	    struct itimerspec its = {
+		.it_interval = {
+		    .tv_sec = 0,
+		    .tv_nsec = 0,
+		},
+		.it_value = {
+		    .tv_sec = ((sizeof(time_t) == 8) ? INT64_MAX : INT32_MAX),
+		    .tv_nsec = 0,
+		},
+	    };
+	    timerfd_settime(client->timer_fd, 0, &its, NULL);
 	    if (write(client->fd, &response, sizeof(uint8_t)) == sizeof(uint8_t)) {
-		service->free_slots--;
 		if (one)
 		    break;
 	    } else {
@@ -290,19 +346,26 @@ static void service_handle_input(service_t *service, client_t *client)
 
     char op = client->buffer[0];
     switch (op) {
-    case 'l': {
+    case 'l':
+    case 'e': {
 	if (client->buffer_off >= (sizeof(char) + sizeof(uint16_t))) {
 	    uint32_t len;
 	    memcpy(&len, client->buffer + sizeof(char), sizeof(uint16_t));
 	    len = ntohs(len);
-	    if (len <= 512) {
+	    if (len <= CLIENT_MESSAGE_SIZE) {
 		size_t entry_len = sizeof(char) + sizeof(uint16_t) + len;
 		if (client->buffer_off >= entry_len) {
-		    service_log(service, client->buffer + (sizeof(char) + sizeof(uint16_t)), len);
+		    if (op == 'l')
+			service_log(service, client->buffer + (sizeof(char) + sizeof(uint16_t)), len);
+		    else
+			service_log_error(service, client->buffer + (sizeof(char) + sizeof(uint16_t)), len);
 		    memmove(client->buffer, client->buffer + entry_len, client->buffer_off -= entry_len);
 		}
 	    } else {
-		fprintf(stderr, "Protocol error: too big log message\n");
+		if (op == 'l')
+		    fprintf(stderr, "Protocol error: too big log message\n");
+		else
+		    fprintf(stderr, "Protocol error: too big error log message\n");
 		service_drop_client(service, client);
 	    }
 	}
@@ -321,9 +384,13 @@ static void service_handle_input(service_t *service, client_t *client)
 		    /* Immediate answer */
 		    uint8_t response = (service->free_slots > 0) ? 1 : 0;
 		    if (write(client->fd, &response, sizeof(uint8_t)) == sizeof(uint8_t)) {
-			if (response) {
-			    client->slot_reserved = 1;
-			    service->free_slots--;
+			if (service->free_slots > 0)
+			    service_reserve_slot(service, client);
+			if (service->verbose) {
+			    if (client->slot_reserved)
+				fprintf(stderr, "Given slot (%d slots free now)\n", service->free_slots);
+			    else
+				fprintf(stderr, "Declined slot (%d slots free now)\n", service->free_slots);
 			}
 		    } else {
 			fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
@@ -331,6 +398,8 @@ static void service_handle_input(service_t *service, client_t *client)
 		    }
 		} else {
 		    /* Arming timeout */
+		    if (service->verbose)
+			fprintf(stderr, "Arming declining slot on timeout\n");
 		    struct timespec tm;
 		    if (!clock_gettime(CLOCK_MONOTONIC, &tm)) {
 			timespec_add_msec(&tm, timeout_ms);
@@ -341,7 +410,7 @@ static void service_handle_input(service_t *service, client_t *client)
 			    },
 			    .it_value = tm,
 			};
-			timerfd_settime(client->timer_fd, TFD_NONBLOCK, &its, NULL);
+			timerfd_settime(client->timer_fd, 0, &its, NULL);
 			client->slot_requested = 1;
 		    } else {
 			fprintf(stderr, "Failed to get current time: %s\n", strerror(errno));
@@ -361,8 +430,11 @@ static void service_handle_input(service_t *service, client_t *client)
 	int previous_free_slots = service->free_slots;
 	int drop_client = 0;
 	if (client->slot_reserved) {
-	    client->slot_reserved = 0;
-	    service->free_slots++;
+	    if (service->verbose)
+		fprintf(stderr, "Releasing slot (%d slot free now)...\n", service->free_slots);
+	    service_release_slot(service, client);
+	    if (service->verbose)
+		fprintf(stderr, "1; Slot released (%d slot free now)\n", service->free_slots);
 	    uint8_t response = 1;
 	    if (write(client->fd, &response, sizeof(uint8_t)) != sizeof(uint8_t)) {
 		fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
@@ -420,6 +492,8 @@ static int service_main(service_t *service)
 	    if (is_timerfd) {
 		uint64_t count;
 		if ((read(client->timer_fd, &count, sizeof(uint64_t)) == sizeof(uint64_t)) && count) {
+		    if (service->verbose)
+			fprintf(stderr, "Slot request timed out\n");
 		    if (client->slot_requested) {
 			client->slot_requested = 0;
 			uint8_t response = 0;
@@ -488,12 +562,16 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->port_number = 0;
     args->host_name = NULL;
     args->log_file_name = NULL;
+    args->error_log_file_name = NULL;
 
     int opt;
-    while ((opt = getopt(argc, argv, ":l:p:h:a:v")) != -1) {
+    while ((opt = getopt(argc, argv, ":l:e:p:h:a:v")) != -1) {
         switch (opt) {
 	case 'l':
 	    args->log_file_name = optarg;
+	    break;
+	case 'e':
+	    args->error_log_file_name = optarg;
 	    break;
 	case 'p':
 	    args->port_number = atoi(optarg);
@@ -524,12 +602,16 @@ static int parse_arguments(args_t *args, int argc, char **argv)
             return -1;
         }
     }
-    
+
     if (!args->port_number) {
 	fprintf(stderr, "Missing mandatory service port option\n");
 	return -1;
     }
     if (!args->log_file_name) {
+	fprintf(stderr, "Missing mandatory log filename option\n");
+	return -1;
+    }
+    if (!args->error_log_file_name) {
 	fprintf(stderr, "Missing mandatory log filename option\n");
 	return -1;
     }
@@ -540,7 +622,7 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     if (!args->port_number) {
 	fprintf(stderr, "Missing mandatory port number option\n");
 	return -1;
-    }	
+    }
     return 0;
 }
 
