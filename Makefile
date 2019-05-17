@@ -1,5 +1,5 @@
-﻿CFLAGS=-g -std=gnu99 -Wall -Wextra -Werror=implicit-function-declaration
-LDFLAGS=-lz
+﻿CFLAGS=-g -Wall -Wextra -Werror=implicit-function-declaration
+LDFLAGS=-lz -lrt
 
 
 all: bin/pdd bin/pdd_server
@@ -15,13 +15,13 @@ bin/pdd_server: server.o common.o
 
 
 common.o: common.c common.h
-	gcc -c -std=c11 common.c $(CFLAGS)
+	gcc -c common.c $(CFLAGS)
 
 client.o: client.c common.h
-	gcc -c -std=c11 client.c $(CFLAGS)
+	gcc -c client.c $(CFLAGS)
 
 server.o: server.c common.h
-	gcc -c -std=c11 server.c $(CFLAGS)
+	gcc -c server.c $(CFLAGS)
 
 
 clean:
