@@ -156,6 +156,7 @@ static int decompress_file(args_t args)
     size_t zero_slot_retries = 0;
     size_t zero_slot_reads = 0;
     size_t total_zero_slot_retries = 0;
+    size_t read_count = 0;
 
     // network variables
     int client_sock = pdd_connect(args);
@@ -217,11 +218,16 @@ static int decompress_file(args_t args)
             }
         }
 
+	++read_count;
+
 	{
 	    struct timespec begin_time;
 	    start_timing(&begin_time);
 	    if (!(s.avail_in = fread(read_buf, 1, args.read_buffer_size, in))) {
-		fprintf(stderr, "Unexpected EOF from input file: archive not finished\n");
+		length = snprintf(msg, sizeof(msg), "file: %s, unexpected EOF from input file: archive not finished", args.input_file_name);
+		if (send_log_message(client_sock, msg, length, 'e'))
+		  fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
+
 		return 1;
 	    }
 	    finish_timing(&begin_time, &read_duration);
@@ -282,11 +288,11 @@ static int decompress_file(args_t args)
     }
 
 
-    length = snprintf(msg, sizeof(msg), "%s|%lld.%09d|%lld.%09d|%lld.%09d|%d|%d", args.input_file_name,
+    length = snprintf(msg, sizeof(msg), "%s|%lld.%09d|%lld.%09d|%lld.%09d|%d|%d|%d", args.input_file_name,
 		      (long long int) read_duration.tv_sec, (int) read_duration.tv_nsec,
 		      (long long int) decomp_duration.tv_sec, (int) decomp_duration.tv_nsec,
 		      (long long int) write_duration.tv_sec, (int) write_duration.tv_nsec,
-		      (int) zero_slot_reads, (int) total_zero_slot_retries);
+		      (int) read_count, (int) zero_slot_reads, (int) total_zero_slot_retries);
     if (send_log_message(client_sock, msg, length, 'l')) {
 	fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
 	return 1;
