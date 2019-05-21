@@ -187,6 +187,10 @@ static int client_read_to_buffer(client_t *client)
     }
     return -1;
 }
+static inline void client_remove_messaage(client_t *client, size_t message_len)
+{
+    memmove(client->buffer, client->buffer + message_len, client->buffer_off -= message_len);
+}
 
 static int init_sockaddr(struct sockaddr *addr, const char *host, uint16_t port)
 {
@@ -372,7 +376,7 @@ static void service_handle_input(service_t *service, client_t *client)
 			service_log(service, client->buffer + (sizeof(char) + sizeof(uint16_t)), len);
 		    else
 			service_log_error(service, client->buffer + (sizeof(char) + sizeof(uint16_t)), len);
-		    memmove(client->buffer, client->buffer + entry_len, client->buffer_off -= entry_len);
+		    client_remove_messaage(client, entry_len);
 		}
 	    } else {
 		if (op == 'l')
@@ -389,8 +393,7 @@ static void service_handle_input(service_t *service, client_t *client)
 	    memcpy(&timeout_ms, client->buffer + sizeof(char), sizeof(uint32_t));
 	    timeout_ms = ntohl(timeout_ms);
 
-	    size_t entry_len = sizeof(char) + sizeof(uint32_t);
-	    memmove(client->buffer, client->buffer + entry_len, client->buffer_off -= entry_len);
+	    client_remove_messaage(client, sizeof(char) + sizeof(uint32_t));
 
 	    if (!client->slot_reserved) {
 		if ((service->free_slots > 0) || !timeout_ms) {
@@ -437,8 +440,7 @@ static void service_handle_input(service_t *service, client_t *client)
 	}
     } break;
     case 'r': {
-	size_t entry_len = sizeof(char);
-	memmove(client->buffer, client->buffer + entry_len, client->buffer_off -= entry_len);
+	client_remove_messaage(client, sizeof(char));
 
 	int previous_free_slots = service->free_slots;
 	int drop_client = 0;
@@ -471,9 +473,9 @@ static void service_handle_input(service_t *service, client_t *client)
 		new_max_free_slots_unsigned = MAX_SLOT_COUNT;
 	    int new_max_free_slots = new_max_free_slots_unsigned;
 	    service->free_slots += new_max_free_slots - service->max_free_slots;
+	    service->max_free_slots = new_max_free_slots;
 
-	    size_t entry_len = sizeof(char) + sizeof(uint32_t);
-	    memmove(client->buffer, client->buffer + entry_len, client->buffer_off -= entry_len);
+	    client_remove_messaage(client, sizeof(char) + sizeof(uint32_t));
 
 	    uint8_t response = 1;
 	    if (write(client->fd, &response, sizeof(uint8_t)) != sizeof(uint8_t)) {
@@ -482,7 +484,19 @@ static void service_handle_input(service_t *service, client_t *client)
 	    }
 
 	    service_give_free_slots(service, 0);
+	    fprintf(stderr, "New max free slots: %d\n", (int) service->max_free_slots);
 	}
+    } break;
+    case 'G': {
+	client_remove_messaage(client, sizeof(char));
+
+	uint32_t response = htonl(service->max_free_slots);
+	if (write(client->fd, &response, sizeof(uint32_t)) != sizeof(uint32_t)) {
+	    fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
+	    service_drop_client(service, client);
+	}
+
+	service_give_free_slots(service, 0);
     } break;
     default: {
 	fprintf(stderr, "Protocol error: unhandled command '%c' (%d)\n", op, (int) op);
@@ -492,7 +506,7 @@ static void service_handle_input(service_t *service, client_t *client)
 }
 static int service_main(service_t *service)
 {
-    fprintf(stderr, "server is ready to accept connections, initial slots: %d\n", (int) service->free_slots);
+    fprintf(stderr, "Server is ready to accept connections, max free slots: %d\n", (int) service->max_free_slots);
 
     struct epoll_event events[256];
     int events_num;
@@ -558,14 +572,14 @@ static int run_server(const args_t *args, int term_fd)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -l LOG_FILENAME -e ERROR_LOG_FILENAME -p PORT -a AVAILABLE_SLOTS [-h HOST] [-v]\n", app);
+    fprintf(stderr, "Usage: %s -p PORT -l LOG_FILENAME -e ERROR_LOG_FILENAME -a AVAILABLE_SLOTS [-h HOST] [-v]\n", app);
     fprintf(stderr, "\n");
+    fprintf(stderr, "  -p PORT                  set port\n");
     fprintf(stderr, "  -l LOG_FILENAME          set log filename\n");
     fprintf(stderr, "  -e LOG_ERROR_FILENAME    set error log filename\n");
-    fprintf(stderr, "  -p PORT                  set port\n");
     fprintf(stderr, "  -a AVAILABLE_SLOTS       specifies total number of available slots in range [1..%d]\n", (int) MAX_SLOT_COUNT);
     fprintf(stderr, "  -h HOST                  set host\n");
-    fprintf(stderr, "  -v                       switch verbose mode\n");
+    fprintf(stderr, "  -v                       turn on verbose mode\n");
 }
 
 
@@ -578,8 +592,9 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->log_file_name = NULL;
     args->error_log_file_name = NULL;
 
+    opterr = 0;
     int opt;
-    while ((opt = getopt(argc, argv, ":l:e:p:h:a:v")) != -1) {
+    while ((opt = getopt(argc, argv, "l:e:p:h:a:v")) != -1) {
         switch (opt) {
 	case 'l':
 	    args->log_file_name = optarg;
@@ -611,6 +626,10 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	case 'v':
 	    args->verbose = 1;
 	    break;
+	case '?':
+	case ':':
+            fprintf(stderr, "Invalid arguments\n");
+            return -1;
 	default:
             fprintf(stderr, "Unsupported option '%c'\n", opt);
             return -1;

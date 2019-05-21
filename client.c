@@ -19,15 +19,16 @@
 
 
 typedef struct args_t {
-    char verbose;
     const char* host_name;
     size_t port_number;
-    size_t read_buffer_size;
+    ssize_t read_buffer_size;
     size_t decompress_buffer_size;
     size_t slots;
-    size_t zero_slots_max_retries;
+    int zero_slots_max_retries;
     const char* input_file_name;
     int32_t set_max_slot_count;
+    int32_t get_max_slot_count;
+    char verbose;
 } args_t;
 
 
@@ -115,14 +116,15 @@ static int set_max_slot_count(args_t args)
     message[0] = 'S';
     memcpy (message + 1, &max_slot_count, sizeof(int));
 
-    if (send_all(client_sock, message, sizeof(message))) {
-        fprintf(stderr, "failed to send configuration request\n");
+    ssize_t ret;
+    if ((ret = write(client_sock, message, sizeof(message))) != sizeof(message)) {
+        fprintf(stderr, "failed to send configuration request: %s\n", ((ret == -1) ? strerror(errno) : "unexpected kernel TCP buffer overflow"));
         return 1;
     }
-
-    unsigned char response;
-    if (recv_all(client_sock, &response, sizeof(uint8_t))) {
-        fprintf(stderr, "failed to send configuration request\n");
+    
+    uint8_t response;
+    if ((ret = read(client_sock, &response, sizeof(uint8_t))) != sizeof(uint8_t)) {
+        fprintf(stderr, "failed to send configuration request: %s\n", ((ret == -1) ? strerror(errno) : "connection closed by server"));
         return 1;
     }
 
@@ -132,6 +134,29 @@ static int set_max_slot_count(args_t args)
     }
 
     fprintf(stderr, "socket count updated\n");
+    return 0;
+}
+static int get_max_slot_count(args_t args)
+{
+    int client_sock = pdd_connect(args);
+    if (client_sock < 0)
+	return 1;
+
+    char message[1] = {'G'};
+    ssize_t ret;
+    if ((ret = write(client_sock, message, sizeof(char))) != sizeof(char)) {
+        fprintf(stderr, "failed to send configuration request: %s\n", ((ret == -1) ? strerror(errno) : "unexpected kernel TCP buffer overflow"));
+        return 1;
+    }
+    
+    uint32_t response;
+    if ((ret = read(client_sock, &response, sizeof(uint32_t))) != sizeof(uint32_t)) {
+        fprintf(stderr, "failed to send configuration request: %s\n", ((ret == -1) ? strerror(errno) : "connection closed by server"));
+        return 1;
+    }
+    response = ntohl(response);
+
+    fprintf(stderr, "Maximum slot count at server is %u\n", response);
     return 0;
 }
 
@@ -148,9 +173,9 @@ static int decompress_file(args_t args)
     char msg[2048];
 
     // zero slots metrics
-    size_t zero_slot_retries = 0;
-    size_t zero_slot_reads = 0;
-    size_t total_zero_slot_retries = 0;
+    int zero_slot_retries = 0;
+    int zero_slot_reads = 0;
+    int total_zero_slot_retries = 0;
     size_t read_count = 0;
 
     // network variables
@@ -298,68 +323,127 @@ static int decompress_file(args_t args)
     return 0;
 }
 
-static void print_usage()
+static void print_usage(const char *app)
 {
-    fprintf(stderr, "TODO\n");
+    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE -z ZERO_SLOT_MAX_RETIRES [-v]\n", app);
+    fprintf(stderr, "       or\n");
+    fprintf(stderr, "       %s -h HOST -p PORT -S MAX_FREE_SLOT_COUNT [-v]\n", app);
+    fprintf(stderr, "       or\n");
+    fprintf(stderr, "       %s -h HOST -p PORT -G [-v]\n", app);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  -h HOST                    set host to connect to\n");
+    fprintf(stderr, "  -p PORT                    set port to connect to\n");
+    fprintf(stderr, "  -f INPUT_FNAME             set input filename\n");
+    fprintf(stderr, "  -r READ_BUFFER_SIZE        set read buffer size\n");
+    fprintf(stderr, "  -d DECOMPRESS_BUFFER_SIZE  set decompress buffer size\n");
+    fprintf(stderr, "  -z ZERO_SLOT_MAX_RETIRES   set error log filename\n");
+    fprintf(stderr, "  -v                         turn on verbose mode\n");
 }
-static int check_arguments()
+
+static int parse_arguments(args_t *args, int argc, char **argv)
 {
-    //TODO
+    args->port_number = 0;
+    args->host_name = NULL;
+    args->read_buffer_size = 0;
+    args->decompress_buffer_size = 0;
+    args->input_file_name = NULL;
+    args->zero_slots_max_retries = 0;
+    args->set_max_slot_count = -1;
+    args->get_max_slot_count = -1;
+    args->verbose = 0;
+
+    opterr = 0;
+    int opt;
+    while ((opt = getopt(argc, argv, "h:p:f:r:d:z:S:Gv")) != -1) {
+        switch (opt) {
+	case 'h':
+	    args->host_name = optarg;
+	    break;
+	case 'p':
+	    args->port_number = atoi(optarg);
+	    if (args->port_number <= 0 || args->port_number > 65535) {
+		fprintf(stderr, "Invalid service port '%s'\n", optarg);
+		return -1;
+	    }
+	    break;
+	case 'f':
+	    args->input_file_name = optarg;
+	    break;
+	case 'r':
+	    if (!(args->read_buffer_size = atoi(optarg))) {
+		fprintf(stderr, "Invalid read buffer size '%s'\n", optarg);
+		return -1;
+	    }
+	    break;
+	case 'd':
+	    if (!(args->decompress_buffer_size = atoi(optarg))) {
+		fprintf(stderr, "Invalid decompress buffer size '%s'\n", optarg);
+		return -1;
+	    }
+	    break;
+	case 'z':
+	    if ((args->zero_slots_max_retries = atoi(optarg)) < 0) {
+		fprintf(stderr, "Invalid zero slots max retires '%s'\n", optarg);
+		return -1;
+	    }
+	    break;
+	case 'S':
+	    args->set_max_slot_count = atoi(optarg);
+	    break;
+	case 'G':
+	    args->get_max_slot_count = 1;
+	    break;
+	case 'v':
+	    args->verbose = 1;
+	    break;
+	case '?':
+	case ':':
+            fprintf(stderr, "Invalid arguments\n");
+            return -1;
+	default:
+            fprintf(stderr, "Unsupported option '%c'\n", opt);
+            return -1;
+        }
+    }
+
+    if (!args->host_name) {
+	fprintf(stderr, "Missing mandatory service port option\n");
+	return -1;
+    }
+    if (!args->port_number) {
+	fprintf(stderr, "Missing mandatory service port option\n");
+	return -1;
+    }
+    if (args->set_max_slot_count < 0 &&
+	args->get_max_slot_count < 0) {
+	if (!args->decompress_buffer_size) {
+	    fprintf(stderr, "Missing mandatory decompress buffer size option\n");
+	    return -1;
+	}
+	if (args->slots <= 0) {
+	    fprintf(stderr, "Missing mandatory slot count option\n");
+	    return -1;
+	}
+	if (!args->port_number) {
+	    fprintf(stderr, "Missing mandatory port number option\n");
+	    return -1;
+	}
+    }
     return 0;
 }
 
 int main(int argc, char** argv)
 {
     args_t args;
-    args.verbose = 0;
-    args.port_number = 0;
-    args.host_name = NULL;
-    args.read_buffer_size = 0;
-    args.decompress_buffer_size = 0;
-    args.input_file_name = NULL;
-    args.zero_slots_max_retries = 0;
-    args.set_max_slot_count = -1;
-
-    int opt = 0;
-    while ((opt = getopt(argc, argv, ":f:l:r:d:sp:h:a:vz:S:")) != -1) {
-        switch (opt) {
-	case 'f':
-	    args.input_file_name = optarg;
-	    break;
-	case 'r':
-	    args.read_buffer_size = atoi(optarg);
-	    break;
-	case 'd':
-	    args.decompress_buffer_size = atoi(optarg);
-	    break;
-	case 'p':
-	    args.port_number = atoi(optarg);
-	    break;
-	case 'h':
-	    args.host_name = optarg;
-	    break;
-	case 'v':
-	    args.verbose = 1;
-	    break;
-	case 'z':
-	    args.zero_slots_max_retries = atoi(optarg);
-	    break;
-	case 'S':
-	    args.set_max_slot_count = atoi(optarg);
-	    break;
-	default:
-            fprintf(stderr, "Unsupported option '%c'\n", opt);
-	    print_usage();
-	    return 1;
-        }
-        if (check_arguments() != 0) {
-            fprintf(stderr, "incorrect arguments\n");
-            return 1;
-        }
+    if (parse_arguments(&args, argc, argv)) {
+	print_usage(argv[0]);
+	return 1;
     }
 
     if (args.set_max_slot_count >= 0)
 	return set_max_slot_count(args);
+    if (args.get_max_slot_count >= 0)
+	return get_max_slot_count(args);
 
     return decompress_file(args);
 }
