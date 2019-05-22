@@ -24,6 +24,7 @@ typedef struct args_t {
     ssize_t read_buffer_size;
     size_t decompress_buffer_size;
     size_t slots;
+    int slot_request_timeout_ms;
     int zero_slots_max_retries;
     const char* input_file_name;
     int32_t set_max_slot_count;
@@ -210,8 +211,7 @@ static int decompress_file(args_t args)
         // check available slot
         op = 'g';
         send_all(client_sock, &op, sizeof(char));
-	uint32_t timeout_ms = 1000;
-	uint32_t timeout_ms_be = htonl(timeout_ms);
+	uint32_t timeout_ms_be = htonl(args.slot_request_timeout_ms);
         send_all(client_sock, &timeout_ms_be, sizeof(uint32_t));
 	unsigned char response;
         recv_all(client_sock, &response, sizeof(uint8_t));
@@ -325,7 +325,7 @@ static int decompress_file(args_t args)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE -z ZERO_SLOT_MAX_RETIRES [-v]\n", app);
+    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE -t SLOT_REQUEST_TIMEOUT -z ZERO_SLOT_MAX_RETIRES [-v]\n", app);
     fprintf(stderr, "       or\n");
     fprintf(stderr, "       %s -h HOST -p PORT -S MAX_FREE_SLOT_COUNT [-v]\n", app);
     fprintf(stderr, "       or\n");
@@ -336,6 +336,7 @@ static void print_usage(const char *app)
     fprintf(stderr, "  -f INPUT_FNAME             set input filename\n");
     fprintf(stderr, "  -r READ_BUFFER_SIZE        set read buffer size\n");
     fprintf(stderr, "  -d DECOMPRESS_BUFFER_SIZE  set decompress buffer size\n");
+    fprintf(stderr, "  -t SLOT_REQUEST_TIMEOUT    set slot request timeout (in milliseconds)\n");
     fprintf(stderr, "  -z ZERO_SLOT_MAX_RETIRES   set error log filename\n");
     fprintf(stderr, "  -v                         turn on verbose mode\n");
 }
@@ -347,6 +348,7 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->read_buffer_size = 0;
     args->decompress_buffer_size = 0;
     args->input_file_name = NULL;
+    args->slot_request_timeout_ms = 0;
     args->zero_slots_max_retries = 0;
     args->set_max_slot_count = -1;
     args->get_max_slot_count = -1;
@@ -354,7 +356,7 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 
     opterr = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "h:p:f:r:d:z:S:Gv")) != -1) {
+    while ((opt = getopt(argc, argv, "h:p:f:r:d:t:z:S:Gv")) != -1) {
         switch (opt) {
 	case 'h':
 	    args->host_name = optarg;
@@ -378,6 +380,12 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	case 'd':
 	    if (!(args->decompress_buffer_size = atoi(optarg))) {
 		fprintf(stderr, "Invalid decompress buffer size '%s'\n", optarg);
+		return -1;
+	    }
+	    break;
+	case 't':
+	    if ((args->slot_request_timeout_ms = atoi(optarg)) < 0) {
+		fprintf(stderr, "Invalid slot request timeout (msec) '%s'\n", optarg);
 		return -1;
 	    }
 	    break;
