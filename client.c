@@ -19,11 +19,10 @@
 
 
 typedef struct args_t {
-    const char* host_name;
-    size_t port_number;
+    const char* host;
+    size_t port;
     ssize_t read_buffer_size;
     size_t decompress_buffer_size;
-    size_t slots;
     int slot_request_timeout_ms;
     const char* input_file_name;
     int32_t set_max_slot_count;
@@ -81,13 +80,13 @@ static int pdd_connect(const args_t *args)
         return -1;
     }
 
-    if (inet_pton(AF_INET, args->host_name, &addr.sin_addr) != 1) {
+    if (inet_pton(AF_INET, args->host, &addr.sin_addr) != 1) {
         fprintf(stderr, "could not get address\n");
         return -1;
     }
 
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(args->port_number);
+    addr.sin_port = htons(args->port);
     if (connect(client_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         fprintf(stderr, "could not connect to host\n");
         return -1;
@@ -153,21 +152,17 @@ static int get_max_slot_count(const args_t *args)
 
 static int decompress_file(const args_t *args)
 {
-    //metrics variables
     struct timespec read_duration = {.tv_sec = 0, .tv_nsec = 0};
     struct timespec decomp_duration = {.tv_sec = 0, .tv_nsec = 0};
     struct timespec write_duration = {.tv_sec = 0, .tv_nsec = 0};
 
-    // communication variables
     char op;
     unsigned short length;
     char msg[2048];
 
-    // zero slots metrics
     int zero_slot_reads = 0;
     size_t read_count = 0;
 
-    // network variables
     int client_sock = pdd_connect(args);
     if (client_sock < 0)
 	return 1;
@@ -342,7 +337,7 @@ static int decompress_file(const args_t *args)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE -t SLOT_REQUEST_TIMEOUT [-v]\n", app);
+    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE [-t SLOT_REQUEST_TIMEOUT] [-v]\n", app);
     fprintf(stderr, "       or\n");
     fprintf(stderr, "       %s -h HOST -p PORT -S MAX_FREE_SLOT_COUNT [-v]\n", app);
     fprintf(stderr, "       or\n");
@@ -355,12 +350,15 @@ static void print_usage(const char *app)
     fprintf(stderr, "  -d DECOMPRESS_BUFFER_SIZE      set decompress buffer size\n");
     fprintf(stderr, "  -t SLOT_REQUEST_TIMEOUT        set slot request timeout (in milliseconds)\n");
     fprintf(stderr, "  -v                             turn on verbose mode\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  -S MAX_FREE_SLOT_COUNT         set max free slot count and exit\n");
+    fprintf(stderr, "  -G                             get and print max free slot count and exit\n");
 }
 
 static int parse_arguments(args_t *args, int argc, char **argv)
 {
-    args->port_number = 0;
-    args->host_name = NULL;
+    args->port = 0;
+    args->host = NULL;
     args->read_buffer_size = 0;
     args->decompress_buffer_size = 0;
     args->input_file_name = NULL;
@@ -374,11 +372,11 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     while ((opt = getopt(argc, argv, "h:p:f:r:d:t:S:Gv")) != -1) {
         switch (opt) {
 	case 'h':
-	    args->host_name = optarg;
+	    args->host = optarg;
 	    break;
 	case 'p':
-	    args->port_number = atoi(optarg);
-	    if (args->port_number <= 0 || args->port_number > 65535) {
+	    args->port = atoi(optarg);
+	    if (args->port <= 0 || args->port > 65535) {
 		fprintf(stderr, "Invalid service port '%s'\n", optarg);
 		return -1;
 	    }
@@ -423,26 +421,27 @@ static int parse_arguments(args_t *args, int argc, char **argv)
         }
     }
 
-    if (!args->host_name) {
+    if (!args->host) {
 	fprintf(stderr, "Missing mandatory service port option\n");
 	return -1;
     }
-    if (!args->port_number) {
+    if (!args->port) {
 	fprintf(stderr, "Missing mandatory service port option\n");
 	return -1;
     }
+
     if (args->set_max_slot_count < 0 &&
 	args->get_max_slot_count < 0) {
+	if (!args->input_file_name) {
+	    fprintf(stderr, "Missing mandatory input filename option\n");
+	    return -1;
+	}
+	if (!args->read_buffer_size) {
+	    fprintf(stderr, "Missing mandatory read buffer size option\n");
+	    return -1;
+	}
 	if (!args->decompress_buffer_size) {
 	    fprintf(stderr, "Missing mandatory decompress buffer size option\n");
-	    return -1;
-	}
-	if (args->slots <= 0) {
-	    fprintf(stderr, "Missing mandatory slot count option\n");
-	    return -1;
-	}
-	if (!args->port_number) {
-	    fprintf(stderr, "Missing mandatory port number option\n");
 	    return -1;
 	}
     }
