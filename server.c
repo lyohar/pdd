@@ -377,6 +377,11 @@ static void service_handle_input(service_t *service, client_t *client)
 		    else
 			service_log_error(service, client->buffer + (sizeof(char) + sizeof(uint16_t)), len);
 		    client_remove_messaage(client, entry_len);
+		    uint8_t response = 0;
+		    if (write(client->fd, &response, sizeof(uint8_t)) != sizeof(uint8_t)) {
+			fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
+			service_drop_client(service, client);
+		    }
 		}
 	    } else {
 		if (op == 'l')
