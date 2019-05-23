@@ -25,8 +25,6 @@ typedef struct args_t {
     size_t decompress_buffer_size;
     size_t slots;
     int slot_request_timeout_ms;
-    int slot_request_cooldown_time_ms;
-    int zero_slots_max_retries;
     const char* input_file_name;
     int32_t set_max_slot_count;
     int32_t get_max_slot_count;
@@ -166,9 +164,7 @@ static int decompress_file(const args_t *args)
     char msg[2048];
 
     // zero slots metrics
-    int zero_slot_retries = 0;
     int zero_slot_reads = 0;
-    int total_zero_slot_retries = 0;
     size_t read_count = 0;
 
     // network variables
@@ -198,7 +194,8 @@ static int decompress_file(const args_t *args)
     for (;;) {
         size_t cur_zero_slot_read = 0;
         if (res == Z_STREAM_END) {
-            fprintf(stderr, "done\n");
+	    if (args->verbose)
+		fprintf(stderr, "Decompression successfully finished\n");
             break;
         }
 
@@ -219,22 +216,9 @@ static int decompress_file(const args_t *args)
 	if (args->verbose)
 	    fprintf(stderr, "Slot reserved\n");
         if (!response) {
-            // wait and get slot again
-            zero_slot_retries += 1;
-            total_zero_slot_retries += 1;
-            if (zero_slot_retries <= args->zero_slots_max_retries) {
-		struct timespec cooldown = {
-		    .tv_sec = args->slot_request_cooldown_time_ms/1000,
-		    .tv_nsec = args->slot_request_cooldown_time_ms%1000*1000000,
-		};
-		nanosleep(&cooldown, NULL);
-		continue;
-	    }
-
-	    fprintf(stderr, "maximum number of retries exceeded, continue reading anyway\n");
+	    fprintf(stderr, "Maximum number of retries exceeded, continue reading anyway\n");
 	    cur_zero_slot_read = 1;
 	    zero_slot_reads += 1;
-	    zero_slot_retries = 0;
 		
 	    length = snprintf(msg, sizeof(msg), "file: %s, maximum retries exceeded, will read anyway", args->input_file_name);
 	    if (send_log_message(client_sock, msg, length, 'e')) {
@@ -271,7 +255,7 @@ static int decompress_file(const args_t *args)
 	}
 
         // reset slot only if we got it
-        if (cur_zero_slot_read == 0) {
+        if (!cur_zero_slot_read) {
             op = 'r';
             if (send_all(client_sock, &op, sizeof(op))) {
 		fprintf(stderr, "Failed to write to server: %s\n", strerror(errno));
@@ -334,11 +318,11 @@ static int decompress_file(const args_t *args)
     }
 
 
-    length = snprintf(msg, sizeof(msg), "%s|%lld.%09d|%lld.%09d|%lld.%09d|%d|%d|%d", args->input_file_name,
+    length = snprintf(msg, sizeof(msg), "%s|%lld.%09d|%lld.%09d|%lld.%09d|%d|%d", args->input_file_name,
 		      (long long int) read_duration.tv_sec, (int) read_duration.tv_nsec,
 		      (long long int) decomp_duration.tv_sec, (int) decomp_duration.tv_nsec,
 		      (long long int) write_duration.tv_sec, (int) write_duration.tv_nsec,
-		      (int) read_count, (int) zero_slot_reads, (int) total_zero_slot_retries);
+		      (int) read_count, (int) zero_slot_reads);
     if (send_log_message(client_sock, msg, length, 'l')) {
 	fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
 	return 1;
@@ -358,7 +342,7 @@ static int decompress_file(const args_t *args)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE -c SLOT_REQUEST_COOLDOWN_TIME -t SLOT_REQUEST_TIMEOUT -z ZERO_SLOT_MAX_RETIRES [-v]\n", app);
+    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE -t SLOT_REQUEST_TIMEOUT [-v]\n", app);
     fprintf(stderr, "       or\n");
     fprintf(stderr, "       %s -h HOST -p PORT -S MAX_FREE_SLOT_COUNT [-v]\n", app);
     fprintf(stderr, "       or\n");
@@ -369,9 +353,7 @@ static void print_usage(const char *app)
     fprintf(stderr, "  -f INPUT_FNAME                 set input filename\n");
     fprintf(stderr, "  -r READ_BUFFER_SIZE            set read buffer size\n");
     fprintf(stderr, "  -d DECOMPRESS_BUFFER_SIZE      set decompress buffer size\n");
-    fprintf(stderr, "  -c SLOT_REQUEST_COOLDOWN_TIME  set slot request cooldown time (in milliseconds)\n");
     fprintf(stderr, "  -t SLOT_REQUEST_TIMEOUT        set slot request timeout (in milliseconds)\n");
-    fprintf(stderr, "  -z ZERO_SLOT_MAX_RETIRES       set error log filename\n");
     fprintf(stderr, "  -v                             turn on verbose mode\n");
 }
 
@@ -383,15 +365,13 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->decompress_buffer_size = 0;
     args->input_file_name = NULL;
     args->slot_request_timeout_ms = 0;
-    args->slot_request_cooldown_time_ms = 0;
-    args->zero_slots_max_retries = 0;
     args->set_max_slot_count = -1;
     args->get_max_slot_count = -1;
     args->verbose = 0;
 
     opterr = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "h:p:f:r:d:t:s:z:S:Gv")) != -1) {
+    while ((opt = getopt(argc, argv, "h:p:f:r:d:t:S:Gv")) != -1) {
         switch (opt) {
 	case 'h':
 	    args->host_name = optarg;
@@ -421,18 +401,6 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	case 't':
 	    if ((args->slot_request_timeout_ms = atoi(optarg)) < 0) {
 		fprintf(stderr, "Invalid slot request timeout (msec) '%s'\n", optarg);
-		return -1;
-	    }
-	    break;
-	case 'c':
-	    if ((args->slot_request_cooldown_time_ms = atoi(optarg)) < 0) {
-		fprintf(stderr, "Invalid slot request cooldown time (msec) '%s'\n", optarg);
-		return -1;
-	    }
-	    break;
-	case 'z':
-	    if ((args->zero_slots_max_retries = atoi(optarg)) < 0) {
-		fprintf(stderr, "Invalid zero slots max retires '%s'\n", optarg);
 		return -1;
 	    }
 	    break;
