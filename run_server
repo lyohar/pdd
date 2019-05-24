@@ -1,1 +1,1 @@
-bin/pdd_server -p 30103 -l log.txt -e error_log.txt -a 1 -m 65536 -v
+bin/pdd_server -p 30103 -l log.txt -e error_log.txt -a 1 -m 65536 -r -v

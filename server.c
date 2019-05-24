@@ -25,6 +25,7 @@
 
 
 typedef struct args_t {
+    char socket_reuse_addr;
     char verbose;
     const char *host;
     int port;
@@ -231,7 +232,7 @@ static int init_sockaddr(struct sockaddr *addr, const char *host, uint16_t port)
     }
     return -1;
 }
-static int start_listening(const char *host, uint16_t port)
+static int start_listening(const char *host, uint16_t port, int reuse_addr)
 {
     struct sockaddr_storage addr;
     if (init_sockaddr((struct sockaddr*) &addr, host, port))
@@ -239,6 +240,11 @@ static int start_listening(const char *host, uint16_t port)
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd != -1) {
+	if (reuse_addr) {
+	    int on_flag = 1;
+	    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on_flag, sizeof(int)) < 0)
+		fprintf(stderr, "WARNING: Failed to set socket into address reusing mode: %s\n", strerror(errno));
+	}
 	if (!bind(fd, (struct sockaddr*) &addr, sizeof(addr))) {
 	    if (make_socket_non_blocking(fd) != -1) {
 		if (!listen(fd, 1024)) {
@@ -270,7 +276,7 @@ static int service_init(service_t *service, const args_t *args, int term_fd)
 	service->term_fd_client.fd = term_fd;
 	if ((service->log_fh = fopen(args->log_filename, "a"))) {
 	    if ((service->error_log_fh = fopen(args->error_log_filename, "a"))) {
-		if ((service->service_socket_fd = start_listening(args->host, args->port)) != -1) {
+		if ((service->service_socket_fd = start_listening(args->host, args->port, args->socket_reuse_addr)) != -1) {
 		    struct epoll_event event;
 		    event.data.ptr = &service->client_list;
 		    event.events = EPOLLIN;
@@ -596,7 +602,7 @@ static int run_server(const args_t *args, int term_fd)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -p PORT -l LOG_FILENAME -e ERROR_LOG_FILENAME -m MAX_CLIENT_CONNECTIONS -a AVAILABLE_SLOTS [-h HOST] [-v]\n", app);
+    fprintf(stderr, "Usage: %s -p PORT -l LOG_FILENAME -e ERROR_LOG_FILENAME -m MAX_CLIENT_CONNECTIONS -a AVAILABLE_SLOTS [-h HOST] [-r] [-v]\n", app);
     fprintf(stderr, "\n");
     fprintf(stderr, "  -p PORT                      set port\n");
     fprintf(stderr, "  -l LOG_FILENAME              set log filename\n");
@@ -604,12 +610,14 @@ static void print_usage(const char *app)
     fprintf(stderr, "  -m MAX_CLIENT_CONNECTIONS    set max incoming client connections\n");
     fprintf(stderr, "  -a AVAILABLE_SLOTS           specifies total number of available slots in range [1..%d]\n", (int) MAX_SLOT_COUNT);
     fprintf(stderr, "  -h HOST                      set host\n");
+    fprintf(stderr, "  -r                           put listening socket into address reuse mode\n");
     fprintf(stderr, "  -v                           turn on verbose mode\n");
 }
 
 
 static int parse_arguments(args_t *args, int argc, char **argv)
 {
+    args->socket_reuse_addr = 0;
     args->verbose = 0;
     args->port = 0;
     args->host = NULL;
@@ -621,7 +629,7 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     opterr = 0;
     int int_value;
     int opt;
-    while ((opt = getopt(argc, argv, "l:e:p:h:m:a:v")) != -1) {
+    while ((opt = getopt(argc, argv, "l:e:p:h:m:a:rv")) != -1) {
         switch (opt) {
 	case 'l':
 	    args->log_filename = optarg;
@@ -650,6 +658,9 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 		fprintf(stderr, "Invalid slot count '%s'\n", optarg);
 		return -1;
 	    }
+	    break;
+	case 'r':
+	    args->socket_reuse_addr = 1;
 	    break;
 	case 'v':
 	    args->verbose = 1;
