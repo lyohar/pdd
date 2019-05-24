@@ -20,7 +20,8 @@
 #include "common.h"
 
 
-#define MAX_SLOT_COUNT 65535
+/* 1 billion slots: */
+#define MAX_SLOT_COUNT 1000000000
 
 
 typedef struct args_t {
@@ -421,22 +422,18 @@ static void service_handle_input(service_t *service, client_t *client)
 		    /* Arming timeout */
 		    if (service->verbose)
 			fprintf(stderr, "Arming declining slot on timeout\n");
-		    struct timespec tm;
-		    if (!clock_gettime(CLOCK_MONOTONIC, &tm)) {
-			timespec_add_msec(&tm, timeout_ms);
-			struct itimerspec its = {
-			    .it_interval = {
-				.tv_sec = 0,
-				.tv_nsec = 0,
-			    },
-			    .it_value = tm,
-			};
-			timerfd_settime(client->timer_fd, 0, &its, NULL);
-			client->slot_requested = 1;
-		    } else {
-			fprintf(stderr, "Failed to get current time: %s\n", strerror(errno));
-			service_drop_client(service, client);
-		    }
+		    struct itimerspec its = {
+			.it_interval = {
+			    .tv_sec = 0,
+			    .tv_nsec = 0,
+			},
+			.it_value = {
+			    .tv_sec = timeout_ms/1000,
+			    .tv_nsec = timeout_ms%1000*1000000,
+			}
+		    };
+		    timerfd_settime(client->timer_fd, 0, &its, NULL);
+		    client->slot_requested = 1;
 		}
 	    } else {
 		fprintf(stderr, "Protocol error: slot already reserved by the client\n");
@@ -590,7 +587,7 @@ static void print_usage(const char *app)
 
 static int parse_arguments(args_t *args, int argc, char **argv)
 {
-    args->slots = 0;
+    args->slots = -1;
     args->verbose = 0;
     args->port_number = 0;
     args->host_name = NULL;
@@ -598,6 +595,7 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->error_log_file_name = NULL;
 
     opterr = 0;
+    int int_value;
     int opt;
     while ((opt = getopt(argc, argv, "l:e:p:h:a:v")) != -1) {
         switch (opt) {
@@ -608,22 +606,17 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	    args->error_log_file_name = optarg;
 	    break;
 	case 'p':
-	    args->port_number = atoi(optarg);
-	    if (args->port_number <= 0 || args->port_number > 65535) {
+	    if (!parse_int(optarg, 1, 65535, &int_value)) {
 		fprintf(stderr, "Invalid service port '%s'\n", optarg);
 		return -1;
 	    }
+	    args->port_number = int_value;
 	    break;
 	case 'h':
 	    args->host_name = optarg;
 	    break;
 	case 'a':
-	    args->slots = atoi(optarg);
-	    if (args->slots <= 0) {
-		fprintf(stderr, "Invalid slot count '%s'\n", optarg);
-		return -1;
-	    }
-	    if (args->slots > MAX_SLOT_COUNT) {
+	    if (!parse_int(optarg, 0, MAX_SLOT_COUNT, &args->slots)) {
 		fprintf(stderr, "Invalid slot count '%s'\n", optarg);
 		return -1;
 	    }
@@ -653,12 +646,8 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	fprintf(stderr, "Missing mandatory error log filename option\n");
 	return -1;
     }
-    if (args->slots <= 0) {
+    if (args->slots < 0) {
 	fprintf(stderr, "Missing mandatory slot count option\n");
-	return -1;
-    }
-    if (!args->port_number) {
-	fprintf(stderr, "Missing mandatory port number option\n");
 	return -1;
     }
     return 0;

@@ -19,6 +19,17 @@
 #include <signal.h>
 
 
+static int parse_int(const char *str, int min_value, int max_value, int *res)
+{
+    if (!*str)
+	return 0;
+    char *eptr;
+    long int v = strtol(str, &eptr, 10);
+    if (*eptr || v < min_value || v > max_value)
+	return 0;
+    *res = v;
+    return 1;
+}
 static inline void start_timing(struct timespec *begin_time)
 {
     if (clock_gettime(CLOCK_MONOTONIC_RAW, begin_time)) {

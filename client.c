@@ -20,9 +20,9 @@
 
 typedef struct args_t {
     const char* host;
-    size_t port;
-    ssize_t read_buffer_size;
-    size_t decompress_buffer_size;
+    uint16_t port;
+    size_t read_buffer_size;
+    uint32_t decompress_buffer_size;
     int slot_request_timeout_ms;
     int force_reading_file;
     const char* input_file_name;
@@ -214,7 +214,7 @@ static int decompress_file(const args_t *args)
 		fprintf(stderr, "Slot reserved\n");
 	} else if (args->force_reading_file) {
 	    if (args->verbose)
-		fprintf(stderr, "Maximum number of retries exceeded, continue reading anyway\n");
+		fprintf(stderr, "Slot request timeout exceeded, continue reading anyway\n");
 	    cur_zero_slot_read = 1;
 	    zero_slot_reads += 1;
 		
@@ -374,6 +374,7 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->verbose = 0;
 
     opterr = 0;
+    int int_value;
     int opt;
     while ((opt = getopt(argc, argv, "h:p:f:r:d:t:eS:Gv")) != -1) {
         switch (opt) {
@@ -381,29 +382,31 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	    args->host = optarg;
 	    break;
 	case 'p':
-	    args->port = atoi(optarg);
-	    if (args->port <= 0 || args->port > 65535) {
+	    if (!parse_int(optarg, 1, 65535, &int_value)) {
 		fprintf(stderr, "Invalid service port '%s'\n", optarg);
 		return -1;
 	    }
+	    args->port = int_value;
 	    break;
 	case 'f':
 	    args->input_file_name = optarg;
 	    break;
 	case 'r':
-	    if (!(args->read_buffer_size = atoi(optarg))) {
+	    if (!parse_int(optarg, 1, 1073741824 /* 1 GB */, &int_value)) {
 		fprintf(stderr, "Invalid read buffer size '%s'\n", optarg);
 		return -1;
 	    }
+	    args->read_buffer_size = int_value;
 	    break;
 	case 'd':
-	    if (!(args->decompress_buffer_size = atoi(optarg))) {
+	    if (!parse_int(optarg, 1, 1073741824 /* 1 GB */, &int_value)) {
 		fprintf(stderr, "Invalid decompress buffer size '%s'\n", optarg);
 		return -1;
 	    }
-	    break;
+	    args->decompress_buffer_size = int_value;
+	    break;	    
 	case 't':
-	    if ((args->slot_request_timeout_ms = atoi(optarg)) < 0) {
+	    if (!parse_int(optarg, 0, 2000000000 /* 2 million seconds */, &args->slot_request_timeout_ms)) {
 		fprintf(stderr, "Invalid slot request timeout (msec) '%s'\n", optarg);
 		return -1;
 	    }
@@ -412,7 +415,10 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	    args->force_reading_file = 1;
 	    break;
 	case 'S':
-	    args->set_max_slot_count = atoi(optarg);
+	    if (!parse_int(optarg, 0, 1000000000 /* 1 billion slots */, &args->set_max_slot_count)) {
+		fprintf(stderr, "Invalid max slot count '%s'\n", optarg);
+		return -1;
+	    }
 	    break;
 	case 'G':
 	    args->get_max_slot_count = 1;
@@ -423,10 +429,10 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	case '?':
 	case ':':
             fprintf(stderr, "Invalid arguments\n");
-            return -1;
+	    return -1;
 	default:
             fprintf(stderr, "Unsupported option '%c'\n", opt);
-            return -1;
+	    return -1;
         }
     }
 
