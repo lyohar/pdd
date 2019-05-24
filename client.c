@@ -24,6 +24,7 @@ typedef struct args_t {
     ssize_t read_buffer_size;
     size_t decompress_buffer_size;
     int slot_request_timeout_ms;
+    int force_reading_file;
     const char* input_file_name;
     int32_t set_max_slot_count;
     int32_t get_max_slot_count;
@@ -184,6 +185,7 @@ static int decompress_file(const args_t *args)
 
     int res = 0;
 
+    uint8_t response;
     ssize_t ret;
 
     for (;;) {
@@ -203,15 +205,16 @@ static int decompress_file(const args_t *args)
 	    fprintf(stderr, "Failed to write to server: %s\n", strerror(errno));
 	    return 1;
 	}
-	unsigned char response;
 	if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 	    fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
 	    return 1;
 	}
-	if (args->verbose)
-	    fprintf(stderr, "Slot reserved\n");
-        if (!response) {
-	    fprintf(stderr, "Maximum number of retries exceeded, continue reading anyway\n");
+        if (response) {
+	    if (args->verbose)
+		fprintf(stderr, "Slot reserved\n");
+	} else if (args->force_reading_file) {
+	    if (args->verbose)
+		fprintf(stderr, "Maximum number of retries exceeded, continue reading anyway\n");
 	    cur_zero_slot_read = 1;
 	    zero_slot_reads += 1;
 		
@@ -220,12 +223,14 @@ static int decompress_file(const args_t *args)
 		fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
 		return 1;
 	    }
-	    response = 0;
 	    if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 		fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
 		return 1;
 	    }
-        }
+        } else {
+	    fprintf(stderr, "Failed to reserve slot, exiting\n");
+	    return 1;
+	}
 
 	++read_count;
 
@@ -238,7 +243,6 @@ static int decompress_file(const args_t *args)
 		  fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
 		  return 1;
 		}
-		response = 0;
 		if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 		    fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
 		    return 1;
@@ -322,7 +326,6 @@ static int decompress_file(const args_t *args)
 	fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
 	return 1;
     }
-    uint8_t response;
     if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 	fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
 	return 1;
@@ -337,7 +340,7 @@ static int decompress_file(const args_t *args)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE [-t SLOT_REQUEST_TIMEOUT] [-v]\n", app);
+    fprintf(stderr, "Usage: %s -h HOST -p PORT -f INPUT_FNAME -r READ_BUFFER_SIZE -d DECOMPRESS_BUFFER_SIZE [-t SLOT_REQUEST_TIMEOUT] [-e] [-v]\n", app);
     fprintf(stderr, "       or\n");
     fprintf(stderr, "       %s -h HOST -p PORT -S MAX_FREE_SLOT_COUNT [-v]\n", app);
     fprintf(stderr, "       or\n");
@@ -349,10 +352,12 @@ static void print_usage(const char *app)
     fprintf(stderr, "  -r READ_BUFFER_SIZE            set read buffer size\n");
     fprintf(stderr, "  -d DECOMPRESS_BUFFER_SIZE      set decompress buffer size\n");
     fprintf(stderr, "  -t SLOT_REQUEST_TIMEOUT        set slot request timeout (in milliseconds)\n");
-    fprintf(stderr, "  -v                             turn on verbose mode\n");
+    fprintf(stderr, "  -e                             force reading file if no slot reserved\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  -S MAX_FREE_SLOT_COUNT         set max free slot count and exit\n");
     fprintf(stderr, "  -G                             get and print max free slot count and exit\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  -v                             turn on verbose mode\n");
 }
 
 static int parse_arguments(args_t *args, int argc, char **argv)
@@ -363,13 +368,14 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->decompress_buffer_size = 0;
     args->input_file_name = NULL;
     args->slot_request_timeout_ms = 0;
+    args->force_reading_file = 0;
     args->set_max_slot_count = -1;
     args->get_max_slot_count = -1;
     args->verbose = 0;
 
     opterr = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "h:p:f:r:d:t:S:Gv")) != -1) {
+    while ((opt = getopt(argc, argv, "h:p:f:r:d:t:eS:Gv")) != -1) {
         switch (opt) {
 	case 'h':
 	    args->host = optarg;
@@ -401,6 +407,9 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 		fprintf(stderr, "Invalid slot request timeout (msec) '%s'\n", optarg);
 		return -1;
 	    }
+	    break;
+	case 'e':
+	    args->force_reading_file = 1;
 	    break;
 	case 'S':
 	    args->set_max_slot_count = atoi(optarg);
