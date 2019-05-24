@@ -37,6 +37,10 @@ typedef struct args_t {
 
 #define CLIENT_MESSAGE_SIZE 2048
 #define CLIENT_BUFFER_SIZE 2176
+typedef struct client_list_ref_t {
+    struct client_t *prev;
+    struct client_t *next;
+} client_list_ref_t;
 typedef struct client_t {
     int fd;
     int timer_fd;
@@ -44,8 +48,8 @@ typedef struct client_t {
     char slot_reserved;
     char buffer[CLIENT_BUFFER_SIZE];
     size_t buffer_off;
-    struct client_t *prev;
-    struct client_t *next;
+    client_list_ref_t full_list_ref;
+    client_list_ref_t request_list_ref;
 } client_t;
 
 
@@ -90,8 +94,10 @@ static void init_client_list(client_t *client_list, int service_fd)
     client_list->fd = service_fd;
     client_list->slot_reserved = 0;
     client_list->buffer_off = 0;
-    client_list->next = client_list;
-    client_list->prev = client_list;
+    client_list->full_list_ref.next = client_list;
+    client_list->full_list_ref.prev = client_list;
+    client_list->request_list_ref.next = client_list;
+    client_list->request_list_ref.prev = client_list;
 }
 static client_t *service_add_client(service_t *service, int fd)
 {
@@ -111,10 +117,15 @@ static client_t *service_add_client(service_t *service, int fd)
 		    client->slot_reserved = 0;
 		    client->slot_requested = 0;
 		    client->buffer_off = 0;
-		    client->prev = service->client_list.prev;
-		    service->client_list.prev->next = client;
-		    service->client_list.prev = client;
-		    client->next = &service->client_list;
+
+		    /* Add client to tail */
+		    client->full_list_ref.prev = service->client_list.full_list_ref.prev;
+		    service->client_list.full_list_ref.prev->full_list_ref.next = client;
+		    service->client_list.full_list_ref.prev = client;
+		    client->full_list_ref.next = &service->client_list;
+
+		    client->request_list_ref.prev = NULL;
+		    client->request_list_ref.next = NULL;
 		    service->client_connection_count++;
 		    return client;
 		} else {
@@ -150,6 +161,34 @@ static int service_release_slot(service_t *service, client_t *client)
     service->free_slots++;
     return 1;
 }
+static void service_add_client_to_request_queue(service_t *service, client_t *client)
+{
+    if (client->request_list_ref.prev || client->request_list_ref.next) {
+	fprintf(stderr, "WARNING: Logical error: called adding client to request queue which is already on request queue\n");
+	return;
+    }
+
+    /* Add client to tail */
+    client->request_list_ref.prev = service->client_list.request_list_ref.prev;
+    service->client_list.request_list_ref.prev->request_list_ref.next = client;
+    service->client_list.request_list_ref.prev = client;
+    client->request_list_ref.next = &service->client_list;
+
+}
+static void service_remove_client_from_request_queue(service_t *service, client_t *client)
+{
+    (void) service;
+
+    if (!client->request_list_ref.prev || !client->request_list_ref.next) {
+	fprintf(stderr, "WARNING: Logical error: called removing client from request queue which is not on request queue\n");
+	return;
+    }
+
+    client->request_list_ref.prev->request_list_ref.next = client->request_list_ref.next;
+    client->request_list_ref.next->request_list_ref.prev = client->request_list_ref.prev;
+    client->request_list_ref.prev = NULL;
+    client->request_list_ref.next = NULL;
+}
 static void service_drop_client(service_t *service, client_t *client)
 {
     if (service_release_slot(service, client)) {
@@ -162,15 +201,19 @@ static void service_drop_client(service_t *service, client_t *client)
 	fprintf(stderr, "Failed to delete entry %d from epoll structure: %s\n", client->timer_fd, strerror(errno));
     close(client->fd);
     close(client->timer_fd);
-    client->prev->next = client->next;
-    client->next->prev = client->prev;
+    client->full_list_ref.prev->full_list_ref.next = client->full_list_ref.next;
+    client->full_list_ref.next->full_list_ref.prev = client->full_list_ref.prev;
+    if (client->request_list_ref.next && client->request_list_ref.prev) {
+	client->request_list_ref.prev->request_list_ref.next = client->request_list_ref.next;
+	client->request_list_ref.next->request_list_ref.prev = client->request_list_ref.prev;
+    }
     free(client);
     service->client_connection_count--;
 }
 static void service_clear_clients(service_t *service)
 {
-    while (service->client_list.next != &service->client_list)
-	service_drop_client(service, service->client_list.next);
+    while (service->client_list.full_list_ref.next != &service->client_list)
+	service_drop_client(service, service->client_list.full_list_ref.next);
 }
 /*
   returns:
@@ -306,8 +349,10 @@ static inline void service_log_error(service_t *service, const char *message, si
 }
 static void service_give_free_slots(service_t *service, int one)
 {
-    client_t *client = service->client_list.next;
+    client_t *client = service->client_list.request_list_ref.next;
     while ((service->free_slots > 0) && (client != &service->client_list)) {
+	client_t *next_client = client->full_list_ref.next;
+	service_remove_client_from_request_queue(service, client);
 	if (client->slot_requested) {
 	    client->slot_requested = 0;
 	    service_reserve_slot(service, client);
@@ -333,7 +378,7 @@ static void service_give_free_slots(service_t *service, int one)
 		service_drop_client(service, client);
 	    }
 	}
-	client = client->next;
+	client = next_client;
     }
 }
 static void service_handle_input(service_t *service, client_t *client)
@@ -413,6 +458,7 @@ static void service_handle_input(service_t *service, client_t *client)
 		    };
 		    timerfd_settime(client->timer_fd, 0, &its, NULL);
 		    client->slot_requested = 1;
+		    service_add_client_to_request_queue(service, client);
 		}
 	    } else {
 		fprintf(stderr, "Protocol error: slot already reserved by the client\n");
@@ -430,7 +476,7 @@ static void service_handle_input(service_t *service, client_t *client)
 		fprintf(stderr, "Releasing slot (%d slot free now)...\n", service->free_slots);
 	    service_release_slot(service, client);
 	    if (service->verbose)
-		fprintf(stderr, "1; Slot released (%d slot free now)\n", service->free_slots);
+		fprintf(stderr, "Slot released (%d slot free now)\n", service->free_slots);
 	    uint8_t response = 1;
 	    if (write(client->fd, &response, sizeof(uint8_t)) != sizeof(uint8_t)) {
 		fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
@@ -504,6 +550,7 @@ static int service_main(service_t *service)
 			fprintf(stderr, "Slot request timed out\n");
 		    if (client->slot_requested) {
 			client->slot_requested = 0;
+			service_remove_client_from_request_queue(service, client);
 			uint8_t response = 0;
 			if (write(client->fd, &response, sizeof(uint8_t)) != sizeof(uint8_t)) {
 			    fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
