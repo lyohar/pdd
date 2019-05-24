@@ -162,15 +162,15 @@ static int decompress_file(const args_t *args)
     if (client_sock < 0)
 	return 1;
 
-    FILE* in = fopen(args->input_file_name, "r");
+    FILE *in = fopen(args->input_file_name, "r");
     if (in == NULL) {
-        fprintf(stderr, "could not open file for reading\n");
+        fprintf(stderr, "Failed open file '%s' for reading: %s\n", args->input_file_name, strerror(errno));
         return 1;
     }
 
     z_stream s = {0};
-    if (inflateInit2(&s, 16+MAX_WBITS) != Z_OK) {
-        fprintf(stderr, "could not inflate stream\n");
+    if (inflateInit2(&s, 16 + MAX_WBITS) != Z_OK) {
+        fprintf(stderr, "Failed to initialize stream\n");
         return 1;
     }
 
@@ -197,11 +197,11 @@ static int decompress_file(const args_t *args)
 	memcpy (request + sizeof(char), &timeout_ms_be, sizeof(uint32_t));
 	if (send_all(client_sock, request, sizeof(request))) {
 	    fprintf(stderr, "Failed to write to server: %s\n", strerror(errno));
-	    return 1;
+	    goto fail;
 	}
 	if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 	    fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
-	    return 1;
+	    goto fail;
 	}
         if (response) {
 	    if (args->verbose)
@@ -215,15 +215,15 @@ static int decompress_file(const args_t *args)
 	    length = snprintf(msg, sizeof(msg), "file: %s, maximum retries exceeded, will read anyway", args->input_file_name);
 	    if (send_log_message(client_sock, msg, length, 'e')) {
 		fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
-		return 1;
+		goto fail;
 	    }
 	    if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 		fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
-		return 1;
+		goto fail;
 	    }
         } else {
 	    fprintf(stderr, "Failed to reserve slot, exiting\n");
-	    return 1;
+	    goto fail;
 	}
 
 	++read_count;
@@ -235,14 +235,14 @@ static int decompress_file(const args_t *args)
 		length = snprintf(msg, sizeof(msg), "file: %s, unexpected EOF from input file: archive not finished", args->input_file_name);
 		if (send_log_message(client_sock, msg, length, 'e')) {
 		  fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
-		  return 1;
+		  goto fail;
 		}
 		if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 		    fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
-		    return 1;
+		    goto fail;
 		}
 
-		return 1;
+		goto fail;
 	    }
 	    finish_timing(&begin_time, &read_duration);
 	}
@@ -252,11 +252,11 @@ static int decompress_file(const args_t *args)
             op = 'r';
             if (send_all(client_sock, &op, sizeof(op))) {
 		fprintf(stderr, "Failed to write to server: %s\n", strerror(errno));
-		return 1;
+		goto fail;
 	    }
 	    if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 		fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
-		return 1;
+		goto fail;
 	    }
 	    if (args->verbose)
 		fprintf(stderr, "Slot released\n");
@@ -264,11 +264,11 @@ static int decompress_file(const args_t *args)
             length = snprintf(msg, sizeof(msg), "file: %s, finished read by zero slot", args->input_file_name);
 	    if (send_log_message(client_sock, msg, length, 'e')) {
 		fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
-		return 1;
+		goto fail;
 	    }
 	    if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 		fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
-		return 1;
+		goto fail;
 	    }
         }
 
@@ -285,8 +285,7 @@ static int decompress_file(const args_t *args)
 	    }
             if (res == Z_NEED_DICT || res == Z_DATA_ERROR || res == Z_MEM_ERROR) {
                 fprintf(stderr, "decompress failed: %d, %s\n", res, s.msg);
-                deflateEnd(&s); free(read_buf); free(decomp_buf); fclose(in);
-                return 1;
+		goto fail;
             }
 
             // out
@@ -298,15 +297,13 @@ static int decompress_file(const args_t *args)
 		size_t write_res = fwrite(decomp_buf, 1, nbytes, stdout);
 		if (write_res != nbytes) {
 		    fprintf(stderr, "could not write to stdout\n");
-		    deflateEnd(&s); free(read_buf); free(decomp_buf); fclose(in);
-		    return 1;
+		    goto fail;
 		}
 		finish_timing(&begin_time, &write_duration);
 	    }
 
-            if (s.avail_out != 0) {
+            if (s.avail_out != 0)
                 break;
-            }
         }
     }
 
@@ -318,18 +315,28 @@ static int decompress_file(const args_t *args)
 		      (int) read_count, (int) zero_slot_reads);
     if (send_log_message(client_sock, msg, length, 'l')) {
 	fprintf(stderr, "Failed to send log message: %s\n", strerror(errno));
-	return 1;
+	goto fail;
     }
     if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
 	fprintf(stderr, "Failed to read from server: %s\n", ret ? strerror(errno) : "connection closed");
-	return 1;
+	goto fail;
     }
     if (args->verbose)
 	fprintf(stderr, "Stats sent to server\n");
 
     close(client_sock);
-    deflateEnd(&s); free(read_buf); free(decomp_buf); fclose(in);
+    inflateEnd(&s);
+    fclose(in);
+    free(read_buf);
+    free(decomp_buf);
     return 0;
+
+ fail:
+    inflateEnd(&s);
+    fclose(in);
+    free(read_buf);
+    free(decomp_buf);
+    return 1;
 }
 
 static void print_usage(const char *app)
