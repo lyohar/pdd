@@ -7,7 +7,6 @@
 #include <errno.h>
 #include <string.h>
 #include <signal.h>
-#include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
@@ -199,43 +198,10 @@ static inline void client_remove_messaage(client_t *client, size_t message_len)
     memmove(client->buffer, client->buffer + message_len, client->buffer_off -= message_len);
 }
 
-static int init_sockaddr(struct sockaddr *addr, const char *host, uint16_t port)
-{
-    if (!host) {
-	((struct sockaddr_in*) addr)->sin_family = AF_INET;
-	((struct sockaddr_in*) addr)->sin_port = htons(port);
-	((struct sockaddr_in*) addr)->sin_addr.s_addr = htonl(INADDR_ANY);
-	return 0;
-    }
-
-    struct addrinfo hints = {
-	.ai_family = AF_INET,
-    };
-    struct addrinfo *res;
-    int ret = getaddrinfo(host, NULL, &hints, &res);
-    if (ret) {
-	fprintf(stderr, "Failed to resolve address '%s': %s\n", host, gai_strerror(ret));
-	return -1;
-    }
-    if (res) {
-	if (res->ai_family == AF_INET) {
-	    memcpy(addr, res->ai_addr, res->ai_addrlen);
-	    ((struct sockaddr_in*) addr)->sin_port = htons(port);
-	    freeaddrinfo(res);
-	    return 0;
-	} else {
-	    fprintf(stderr, "Failed to resolve address '%s': resolved address isn't IPv4 address\n", host);
-	}
-	freeaddrinfo(res);
-    } else {
-	fprintf(stderr, "Failed to resolve address '%s'\n", host);
-    }
-    return -1;
-}
 static int start_listening(const char *host, uint16_t port, int reuse_addr)
 {
-    struct sockaddr_storage addr;
-    if (init_sockaddr((struct sockaddr*) &addr, host, port))
+    struct sockaddr_in addr;
+    if (init_sockaddr_v4(&addr, host, port))
 	return -1;
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);

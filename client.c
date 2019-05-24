@@ -72,24 +72,18 @@ static int send_log_message(int client_sock, const char *message, uint16_t len, 
 }
 static int pdd_connect(const args_t *args)
 {
-    int client_sock;
+    int client_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (client_sock < 0) {
+        fprintf(stderr, "Failed to create client socket: %s\n", strerror(errno));
+        return -1;
+    }
+
     struct sockaddr_in addr;
-
-    client_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if(client_sock < 0) {
-        fprintf(stderr, "could not create client socken\n");
+    if (init_sockaddr_v4(&addr, args->host, args->port))
         return -1;
-    }
 
-    if (inet_pton(AF_INET, args->host, &addr.sin_addr) != 1) {
-        fprintf(stderr, "could not get address\n");
-        return -1;
-    }
-
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(args->port);
-    if (connect(client_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "could not connect to host\n");
+    if (connect(client_sock, (struct sockaddr *)&addr, sizeof(addr))) {
+        fprintf(stderr, "Failed to connect to host '%s': %s\n", args->host, strerror(errno));
         return -1;
     }
 

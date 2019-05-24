@@ -5,17 +5,14 @@ LDFLAGS=-lz -lrt
 all: bin/pdd bin/pdd_server
 
 
-bin/pdd: client.o common.o
+bin/pdd: client.o
 	mkdir -p bin
-	gcc -o bin/pdd client.o common.o $(LDFLAGS)
+	gcc -o bin/pdd client.o $(LDFLAGS)
 
-bin/pdd_server: server.o common.o
+bin/pdd_server: server.o
 	mkdir -p bin
-	gcc -o bin/pdd_server server.o common.o $(LDFLAGS)
+	gcc -o bin/pdd_server server.o $(LDFLAGS)
 
-
-common.o: common.c common.h
-	gcc -c common.c $(CFLAGS)
 
 client.o: client.c common.h
 	gcc -c client.c $(CFLAGS)
@@ -25,5 +22,5 @@ server.o: server.c common.h
 
 
 clean:
-	rm -f bin/pdd bin/pdd_server client.o server.o common.o
+	rm -f bin/pdd bin/pdd_server client.o server.o
 	rmdir bin

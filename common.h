@@ -17,6 +17,7 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <signal.h>
+#include <netdb.h>
 
 
 static int parse_int(const char *str, int min_value, int max_value, int *res)
@@ -58,6 +59,39 @@ static inline void finish_timing(const struct timespec *begin_time, struct times
 	duration.tv_nsec -= 1000000000;
     }
     *duration_r = duration;
+}
+static inline int init_sockaddr_v4(struct sockaddr_in *addr, const char *host, uint16_t port)
+{
+    if (!host) {
+	addr->sin_family = AF_INET;
+	addr->sin_port = htons(port);
+	addr->sin_addr.s_addr = htonl(INADDR_ANY);
+	return 0;
+    }
+
+    struct addrinfo hints = {
+	.ai_family = AF_INET,
+    };
+    struct addrinfo *res;
+    int ret = getaddrinfo(host, NULL, &hints, &res);
+    if (ret) {
+	fprintf(stderr, "Failed to resolve address '%s': %s\n", host, gai_strerror(ret));
+	return -1;
+    }
+    if (res) {
+	if (res->ai_family == AF_INET) {
+	    memcpy(addr, res->ai_addr, res->ai_addrlen);
+	    addr->sin_port = htons(port);
+	    freeaddrinfo(res);
+	    return 0;
+	} else {
+	    fprintf(stderr, "Failed to resolve address '%s': resolved address isn't IPv4 address\n", host);
+	}
+	freeaddrinfo(res);
+    } else {
+	fprintf(stderr, "Failed to resolve address '%s'\n", host);
+    }
+    return -1;
 }
 
 #endif
