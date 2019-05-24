@@ -26,11 +26,12 @@
 
 typedef struct args_t {
     char verbose;
-    const char *host_name;
-    int port_number;
+    const char *host;
+    int port;
+    int max_client_connections;
     int slots;
-    const char *log_file_name;
-    const char *error_log_file_name;
+    const char *log_filename;
+    const char *error_log_filename;
     int term_fd;
 } args_t;
 
@@ -52,6 +53,8 @@ typedef struct service_t {
     int epoll_fd;
     FILE *log_fh;
     FILE *error_log_fh;
+    int max_client_connections;
+    int client_connection_count;
     int max_free_slots;
     int free_slots;
     int service_socket_fd;
@@ -112,6 +115,7 @@ static client_t *service_add_client(service_t *service, int fd)
 		    service->client_list.prev->next = client;
 		    service->client_list.prev = client;
 		    client->next = &service->client_list;
+		    service->client_connection_count++;
 		    return client;
 		} else {
 		    fprintf(stderr, "Failed to add client to epoll: %s\n", strerror(errno));
@@ -161,6 +165,7 @@ static void service_drop_client(service_t *service, client_t *client)
     client->prev->next = client->next;
     client->next->prev = client->prev;
     free(client);
+    service->client_connection_count--;
 }
 static void service_clear_clients(service_t *service)
 {
@@ -257,13 +262,15 @@ static int start_listening(const char *host, uint16_t port)
 static int service_init(service_t *service, const args_t *args, int term_fd)
 {
     if ((service->epoll_fd = epoll_create(1)) != -1) {
+	service->max_client_connections = args->max_client_connections;
+	service->client_connection_count = 0;
 	service->max_free_slots = args->slots;
 	service->free_slots = args->slots;
 	service->service_socket_fd = -1;
 	service->term_fd_client.fd = term_fd;
-	if ((service->log_fh = fopen(args->log_file_name, "a"))) {
-	    if ((service->error_log_fh = fopen(args->error_log_file_name, "a"))) {
-		if ((service->service_socket_fd = start_listening(args->host_name, args->port_number)) != -1) {
+	if ((service->log_fh = fopen(args->log_filename, "a"))) {
+	    if ((service->error_log_fh = fopen(args->error_log_filename, "a"))) {
+		if ((service->service_socket_fd = start_listening(args->host, args->port)) != -1) {
 		    struct epoll_event event;
 		    event.data.ptr = &service->client_list;
 		    event.events = EPOLLIN;
@@ -283,11 +290,11 @@ static int service_init(service_t *service, const args_t *args, int term_fd)
 		}
 		fclose(service->error_log_fh);
 	    } else {
-		fprintf(stderr, "Failed to open error log file '%s' for writing: %s\n", args->error_log_file_name, strerror(errno));
+		fprintf(stderr, "Failed to open error log file '%s' for writing: %s\n", args->error_log_filename, strerror(errno));
 	    }
 	    fclose(service->log_fh);
 	} else {
-	    fprintf(stderr, "Failed to open log file '%s' for writing: %s\n", args->log_file_name, strerror(errno));
+	    fprintf(stderr, "Failed to open log file '%s' for writing: %s\n", args->log_filename, strerror(errno));
 	}
 	close(service->epoll_fd);
     } else {
@@ -538,10 +545,15 @@ static int service_main(service_t *service)
 		if (client->fd == service->service_socket_fd) {
 		    int client_sock = accept(service->service_socket_fd, NULL, NULL);
 		    if (client_sock >= 0) {
-			if (!service_add_client(service, client_sock)) {
-			    fprintf(stderr, "Failed to add client: %s\n", strerror(errno));
+			if (service->client_connection_count < service->max_client_connections) {
+			    if (!service_add_client(service, client_sock)) {
+				fprintf(stderr, "Failed to add client: %s\n", strerror(errno));
+				close(client_sock);
+				return 1;
+			    }
+			} else {
+			    fprintf(stderr, "Failed to accept new client: exceeding configured maximum connection count\n");
 			    close(client_sock);
-			    return 1;
 			}
 		    } else {
 			if (errno != EAGAIN) {
@@ -564,6 +576,16 @@ static int service_main(service_t *service)
 }
 static int run_server(const args_t *args, int term_fd)
 {
+    if (args->verbose) {
+	fprintf(stderr, "Starting service with configuration:\n");
+	fprintf(stderr, "                endpoint = '%s:%d'\n", args->host ? args->host : "0.0.0.0", (int) args->port);
+	fprintf(stderr, "            log filename = '%s'\n", args->log_filename);
+	fprintf(stderr, "      error log filename = '%s'\n", args->error_log_filename);
+	fprintf(stderr, "  max client connections = %d\n", args->max_client_connections);
+	fprintf(stderr, "     max available slots = %d\n", args->slots);
+	fprintf(stderr, "                 verbose = on\n");
+	fprintf(stderr, "\n");
+    }
     service_t service;
     if (service_init(&service, args, term_fd) == -1)
 	return 1;
@@ -574,46 +596,54 @@ static int run_server(const args_t *args, int term_fd)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -p PORT -l LOG_FILENAME -e ERROR_LOG_FILENAME -a AVAILABLE_SLOTS [-h HOST] [-v]\n", app);
+    fprintf(stderr, "Usage: %s -p PORT -l LOG_FILENAME -e ERROR_LOG_FILENAME -m MAX_CLIENT_CONNECTIONS -a AVAILABLE_SLOTS [-h HOST] [-v]\n", app);
     fprintf(stderr, "\n");
-    fprintf(stderr, "  -p PORT                  set port\n");
-    fprintf(stderr, "  -l LOG_FILENAME          set log filename\n");
-    fprintf(stderr, "  -e LOG_ERROR_FILENAME    set error log filename\n");
-    fprintf(stderr, "  -a AVAILABLE_SLOTS       specifies total number of available slots in range [1..%d]\n", (int) MAX_SLOT_COUNT);
-    fprintf(stderr, "  -h HOST                  set host\n");
-    fprintf(stderr, "  -v                       turn on verbose mode\n");
+    fprintf(stderr, "  -p PORT                      set port\n");
+    fprintf(stderr, "  -l LOG_FILENAME              set log filename\n");
+    fprintf(stderr, "  -e LOG_ERROR_FILENAME        set error log filename\n");
+    fprintf(stderr, "  -m MAX_CLIENT_CONNECTIONS    set max incoming client connections\n");
+    fprintf(stderr, "  -a AVAILABLE_SLOTS           specifies total number of available slots in range [1..%d]\n", (int) MAX_SLOT_COUNT);
+    fprintf(stderr, "  -h HOST                      set host\n");
+    fprintf(stderr, "  -v                           turn on verbose mode\n");
 }
 
 
 static int parse_arguments(args_t *args, int argc, char **argv)
 {
-    args->slots = -1;
     args->verbose = 0;
-    args->port_number = 0;
-    args->host_name = NULL;
-    args->log_file_name = NULL;
-    args->error_log_file_name = NULL;
+    args->port = 0;
+    args->host = NULL;
+    args->max_client_connections = -1;
+    args->slots = -1;
+    args->log_filename = NULL;
+    args->error_log_filename = NULL;
 
     opterr = 0;
     int int_value;
     int opt;
-    while ((opt = getopt(argc, argv, "l:e:p:h:a:v")) != -1) {
+    while ((opt = getopt(argc, argv, "l:e:p:h:m:a:v")) != -1) {
         switch (opt) {
 	case 'l':
-	    args->log_file_name = optarg;
+	    args->log_filename = optarg;
 	    break;
 	case 'e':
-	    args->error_log_file_name = optarg;
+	    args->error_log_filename = optarg;
 	    break;
 	case 'p':
 	    if (!parse_int(optarg, 1, 65535, &int_value)) {
 		fprintf(stderr, "Invalid service port '%s'\n", optarg);
 		return -1;
 	    }
-	    args->port_number = int_value;
+	    args->port = int_value;
 	    break;
 	case 'h':
-	    args->host_name = optarg;
+	    args->host = optarg;
+	    break;
+	case 'm':
+	    if (!parse_int(optarg, 0, 1000000000 /* 1 billion connections */, &args->max_client_connections)) {
+		fprintf(stderr, "Invalid max incomming connection count '%s'\n", optarg);
+		return -1;
+	    }
 	    break;
 	case 'a':
 	    if (!parse_int(optarg, 0, MAX_SLOT_COUNT, &args->slots)) {
@@ -634,16 +664,20 @@ static int parse_arguments(args_t *args, int argc, char **argv)
         }
     }
 
-    if (!args->port_number) {
+    if (!args->port) {
 	fprintf(stderr, "Missing mandatory service port option\n");
 	return -1;
     }
-    if (!args->log_file_name) {
+    if (!args->log_filename) {
 	fprintf(stderr, "Missing mandatory log filename option\n");
 	return -1;
     }
-    if (!args->error_log_file_name) {
+    if (!args->error_log_filename) {
 	fprintf(stderr, "Missing mandatory error log filename option\n");
+	return -1;
+    }
+    if (args->max_client_connections < 0) {
+	fprintf(stderr, "Missing mandatory max incomming connections option\n");
 	return -1;
     }
     if (args->slots < 0) {
