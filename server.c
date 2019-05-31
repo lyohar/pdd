@@ -32,6 +32,7 @@ typedef struct args_t {
     int slots;
     const char *log_filename;
     const char *error_log_filename;
+    const char *slot_event_log_filename;
     int term_fd;
 } args_t;
 
@@ -60,6 +61,7 @@ typedef struct service_t {
     int epoll_fd;
     FILE *log_fh;
     FILE *error_log_fh;
+    FILE *slot_event_log_fh;
     int max_client_connections;
     int client_connection_count;
     int max_free_slots;
@@ -91,6 +93,39 @@ static inline void timespec_add_msec(struct timespec *tm, int msec)
 	tm->tv_sec++;
 	tm->tv_nsec -= 1000000000;
     }
+}
+static void get_duration(char *duration, client_t *client, const struct timespec *now)
+{
+    struct timespec delta = {
+	.tv_sec = now->tv_sec - client->slot_reserved_time.tv_sec,
+	.tv_nsec = now->tv_nsec - client->slot_reserved_time.tv_nsec,
+    };
+    if (delta.tv_nsec < 0) {
+	--delta.tv_sec;
+	delta.tv_nsec += 1000000000;
+    }
+    sprintf(duration, "%ld.%09d", delta.tv_sec, (int) delta.tv_nsec);
+}
+static void service_log_slot_event(service_t *service, client_t *client, const char *event, int released)
+{
+    if (!service->slot_event_log_fh) return;
+
+    struct timespec now;
+    struct tm now_tm;
+    char tm_buffer[128];
+    *tm_buffer = '\0';
+    if (!clock_gettime(CLOCK_REALTIME, &now) && gmtime_r(&now.tv_sec, &now_tm))
+	tm_buffer[strftime(tm_buffer, sizeof(tm_buffer) - 1, "%F %T", &now_tm)] = '\0';
+
+    char duration[128];
+    if (released)
+	get_duration(duration, client, &now);
+    fprintf(service->slot_event_log_fh, "%s.%09d|%s|%s|%s|%d\n",
+	    tm_buffer, (int) now.tv_nsec,
+	    (client->fname ? client->fname : ""),
+	    event,
+	    duration,
+	    service->free_slots);
 }
 static void init_client_list(client_t *client_list, int service_fd)
 {
@@ -199,10 +234,8 @@ static void service_remove_client_from_request_queue(service_t *service, client_
 }
 static void service_drop_client(service_t *service, client_t *client)
 {
-    if (service_release_slot(service, client)) {
-	if (service->verbose)
-	    fprintf(stderr, "Slot released (%d slots free now)\n", service->free_slots);
-    }
+    if (service_release_slot(service, client))
+	service_log_slot_event(service, client, "released", 1);
     if (epoll_ctl(service->epoll_fd, EPOLL_CTL_DEL, client->fd, NULL))
 	fprintf(stderr, "Failed to delete entry %d from epoll structure: %s\n", client->fd, strerror(errno));
     if (epoll_ctl(service->epoll_fd, EPOLL_CTL_DEL, client->timer_fd, NULL))
@@ -342,6 +375,10 @@ static int service_init(service_t *service, const args_t *args, int term_fd)
 			if (epoll_ctl(service->epoll_fd, EPOLL_CTL_ADD, service->term_fd_client.fd, &event) != -1) {
 			    init_client_list(&service->client_list, service->service_socket_fd);
 			    service->verbose = args->verbose;
+			    if (args->slot_event_log_filename) {
+				if (!(service->slot_event_log_fh = fopen(args->slot_event_log_filename, "a")))
+				    fprintf(stderr, "WARNING: Failed to open slot event log file '%s' for writing: %s\n", args->slot_event_log_filename, strerror(errno));
+			    }
 			    return 0;
 			} else {
 			    fprintf(stderr, "Failed to add termination event FD to epoll: %s\n", strerror(errno));
@@ -371,6 +408,8 @@ static void service_uninit(service_t *service)
     close(service->service_socket_fd);
     fclose(service->log_fh);
     fclose(service->error_log_fh);
+    if (service->slot_event_log_fh)
+	fclose(service->slot_event_log_fh);
 }
 static inline void service_log(service_t *service, const char *message, size_t len)
 {
@@ -403,8 +442,7 @@ static void service_give_free_slots(service_t *service, int one)
 	if (client->slot_requested) {
 	    client->slot_requested = 0;
 	    service_reserve_slot(service, client);
-	    if (service->verbose)
-		fprintf(stderr, "Slot reserved (%d slots free now)\n", service->free_slots);
+	    service_log_slot_event(service, client, "reserved", 0);
 	    uint8_t response = 1;
 	    struct itimerspec its = {
 		.it_interval = {
@@ -492,12 +530,10 @@ static void service_handle_input(service_t *service, client_t *client)
 		    if (write(client->fd, &response, sizeof(uint8_t)) == sizeof(uint8_t)) {
 			if (service->free_slots > 0)
 			    service_reserve_slot(service, client);
-			if (service->verbose) {
-			    if (client->slot_reserved)
-				fprintf(stderr, "Given slot (%d slots free now)\n", service->free_slots);
-			    else
-				fprintf(stderr, "Declined slot (%d slots free now)\n", service->free_slots);
-			}
+			if (client->slot_reserved)
+			    service_log_slot_event(service, client, "reserved", 0);
+			else
+			    service_log_slot_event(service, client, "declined", 0);
 		    } else {
 			fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
 			service_drop_client(service, client);
@@ -532,11 +568,8 @@ static void service_handle_input(service_t *service, client_t *client)
 	int previous_free_slots = service->free_slots;
 	int drop_client = 0;
 	if (client->slot_reserved) {
-	    if (service->verbose)
-		fprintf(stderr, "Releasing slot (%d slot free now)...\n", service->free_slots);
 	    service_release_slot(service, client);
-	    if (service->verbose)
-		fprintf(stderr, "Slot released (%d slot free now)\n", service->free_slots);
+	    service_log_slot_event(service, client, "released", 1);
 	    uint8_t response = 1;
 	    if (write(client->fd, &response, sizeof(uint8_t)) != sizeof(uint8_t)) {
 		fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
@@ -630,8 +663,7 @@ static int service_main(service_t *service)
 	    if (is_timerfd) {
 		uint64_t count;
 		if ((read(client->timer_fd, &count, sizeof(uint64_t)) == sizeof(uint64_t)) && count) {
-		    if (service->verbose)
-			fprintf(stderr, "Slot request timed out\n");
+		    service_log_slot_event(service, client, "request_timeout", 0);
 		    if (client->slot_requested) {
 			client->slot_requested = 0;
 			service_remove_client_from_request_queue(service, client);
@@ -684,6 +716,10 @@ static int run_server(const args_t *args, int term_fd)
 	fprintf(stderr, "                endpoint = '%s:%d'\n", args->host ? args->host : "0.0.0.0", (int) args->port);
 	fprintf(stderr, "            log filename = '%s'\n", args->log_filename);
 	fprintf(stderr, "      error log filename = '%s'\n", args->error_log_filename);
+	if (args->slot_event_log_filename)
+	    fprintf(stderr, " slot event log filename = '%s'\n", args->slot_event_log_filename);
+	else
+	    fprintf(stderr, " slot event log filename = <unspecified>\n");
 	fprintf(stderr, "  max client connections = %d\n", args->max_client_connections);
 	fprintf(stderr, "     max available slots = %d\n", args->slots);
 	fprintf(stderr, "                 verbose = on\n");
@@ -699,11 +735,12 @@ static int run_server(const args_t *args, int term_fd)
 
 static void print_usage(const char *app)
 {
-    fprintf(stderr, "Usage: %s -p PORT -l LOG_FILENAME -e ERROR_LOG_FILENAME -m MAX_CLIENT_CONNECTIONS -a AVAILABLE_SLOTS [-h HOST] [-r] [-v]\n", app);
+    fprintf(stderr, "Usage: %s -p PORT -l LOG_FILENAME -e ERROR_LOG_FILENAME -m MAX_CLIENT_CONNECTIONS -a AVAILABLE_SLOTS [-h HOST] [-r] [-s SLOT_EVENT_LOG_FILENAME] [-v]\n", app);
     fprintf(stderr, "\n");
     fprintf(stderr, "  -p PORT                      set port\n");
     fprintf(stderr, "  -l LOG_FILENAME              set log filename\n");
     fprintf(stderr, "  -e LOG_ERROR_FILENAME        set error log filename\n");
+    fprintf(stderr, "  -s SLOT_EVENT_LOG_FILENAME   set slot event log filename\n");
     fprintf(stderr, "  -m MAX_CLIENT_CONNECTIONS    set max incoming client connections\n");
     fprintf(stderr, "  -a AVAILABLE_SLOTS           specifies total number of available slots in range [1..%d]\n", (int) MAX_SLOT_COUNT);
     fprintf(stderr, "  -h HOST                      set host\n");
@@ -722,17 +759,21 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->slots = -1;
     args->log_filename = NULL;
     args->error_log_filename = NULL;
+    args->slot_event_log_filename = NULL;
 
     opterr = 0;
     int int_value;
     int opt;
-    while ((opt = getopt(argc, argv, "l:e:p:h:m:a:rv")) != -1) {
+    while ((opt = getopt(argc, argv, "l:e:s:p:h:m:a:rv")) != -1) {
         switch (opt) {
 	case 'l':
 	    args->log_filename = optarg;
 	    break;
 	case 'e':
 	    args->error_log_filename = optarg;
+	    break;
+	case 's':
+	    args->slot_event_log_filename = optarg;
 	    break;
 	case 'p':
 	    if (!parse_int(optarg, 1, 65535, &int_value)) {
