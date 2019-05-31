@@ -20,6 +20,41 @@
 #include <netdb.h>
 
 
+static inline void *check_malloc(size_t size)
+{
+    void *ptr = malloc(size);
+    if (!ptr) {
+	fprintf(stderr, "Failed to allocate %ld bytes\n", size);
+    }
+    return ptr;
+}
+
+static inline int send_all(int sock, const void *data, size_t len)
+{
+    while (len) {
+	ssize_t n = write(sock, data, len);
+	if (n <= 0)
+	    return -1;
+	data += n;
+	len -= n;
+    }    
+    return 0;
+}
+static inline int recv_all(int sock, void *data, size_t len)
+{
+    size_t left = len;
+    while (left) {
+	ssize_t ret = read(sock, data, left);
+        if (!ret)
+	    return 0;
+        if (ret < 0)
+	    return -1;
+	data += ret;
+	left -= ret;
+    }    
+    return 1;
+}
+
 static int parse_int(const char *str, int min_value, int max_value, int *res)
 {
     if (!*str)

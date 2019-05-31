@@ -46,8 +46,11 @@ typedef struct client_t {
     int timer_fd;
     char slot_requested;
     char slot_reserved;
+    struct timespec slot_reserved_time;
     char buffer[CLIENT_BUFFER_SIZE];
     size_t buffer_off;
+    char fname[255];
+    size_t fname_len;
     client_list_ref_t full_list_ref;
     client_list_ref_t request_list_ref;
 } client_t;
@@ -117,6 +120,7 @@ static client_t *service_add_client(service_t *service, int fd)
 		    client->slot_reserved = 0;
 		    client->slot_requested = 0;
 		    client->buffer_off = 0;
+		    client->fname_len = 0;
 
 		    /* Add client to tail */
 		    client->full_list_ref.prev = service->client_list.full_list_ref.prev;
@@ -149,6 +153,10 @@ static int service_reserve_slot(service_t *service, client_t *client)
 	return 0;
 
     client->slot_reserved = 1;
+    if (clock_gettime(CLOCK_REALTIME, &client->slot_reserved_time)) {
+	client->slot_reserved_time.tv_sec = 0;
+	client->slot_reserved_time.tv_nsec = 0;
+    }
     service->free_slots--;
     return 1;
 }
@@ -214,6 +222,45 @@ static void service_clear_clients(service_t *service)
 {
     while (service->client_list.full_list_ref.next != &service->client_list)
 	service_drop_client(service, service->client_list.full_list_ref.next);
+}
+static char *service_build_reservation_state(service_t *service, size_t *reservation_state_len)
+{
+    size_t state_len = 0;
+    size_t state_reserved = 64;
+    char *state = malloc(state_reserved);
+    if (!state)
+	return NULL;
+    client_t *client = service->client_list.full_list_ref.next;
+    while (client != &service->client_list) {
+	if (client->slot_reserved) {
+	    struct tm tm;
+	    char tm_buffer[128];
+	    *tm_buffer = '\0';
+	    if (gmtime_r(&client->slot_reserved_time.tv_sec, &tm))
+		tm_buffer[strftime(tm_buffer, sizeof(tm_buffer) - 1, "%F %T", &tm)] = '\0';
+	    char entry[512];
+	    size_t entry_len = snprintf(entry, sizeof(entry), "%s.%09d|%.*s\n", tm_buffer, (int) client->slot_reserved_time.tv_nsec, (int) client->fname_len, client->fname);
+	    if ((state_len + entry_len) > state_reserved) {
+		char *new_state	= realloc(state, state_reserved <<= 1);
+		if (!new_state) {
+		    free(state);
+		    return NULL;
+		}
+		state = new_state;
+	    }
+	    memcpy(state + state_len, entry, entry_len);
+	    state_len += entry_len;
+	}
+	client = client->full_list_ref.next;
+    }
+    if (!state_len) {
+	free(state);
+	return NULL;
+    }	
+    if (state_len != state_reserved)
+	state = realloc(state, state_len);
+    *reservation_state_len = state_len;
+    return state;
 }
 /*
   returns:
@@ -388,6 +435,19 @@ static void service_handle_input(service_t *service, client_t *client)
 
     char op = client->buffer[0];
     switch (op) {
+    case 'f': {
+	if (client->buffer_off >= 2 && client->buffer_off >= (2 + (size_t) (uint8_t) client->buffer[1])) {
+	    size_t len = (size_t) (uint8_t) client->buffer[1];
+	    memcpy(client->fname, client->buffer + 2, client->fname_len = len);
+	    client->fname[len] = '\0';
+	    client_remove_messaage(client, len + 2);
+	    uint8_t response = 0;
+	    if (write(client->fd, &response, sizeof(uint8_t)) != sizeof(uint8_t)) {
+		fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
+		service_drop_client(service, client);
+	    }
+	}
+    } break;
     case 'l':
     case 'e': {
 	if (client->buffer_off >= (sizeof(char) + sizeof(uint16_t))) {
@@ -527,6 +587,27 @@ static void service_handle_input(service_t *service, client_t *client)
 	}
 
 	service_give_free_slots(service, 0);
+    } break;
+    case 'L': {
+	client_remove_messaage(client, sizeof(char));
+
+	size_t reservation_state_len;
+	char *reservation_state = service_build_reservation_state(service, &reservation_state_len);
+	if (reservation_state) {
+	    uint32_t reservation_state_len_be = htonl(reservation_state_len);
+	    if (send_all(client->fd, &reservation_state_len_be, sizeof(uint32_t)) ||
+		send_all(client->fd, reservation_state, reservation_state_len)) {
+		fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
+		service_drop_client(service, client);
+	    }
+	    free(reservation_state);
+	} else {
+	    uint32_t reservation_state_len_be = 0;
+	    if (send_all(client->fd, &reservation_state_len_be, sizeof(uint32_t))) {
+		fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
+		service_drop_client(service, client);
+	    }
+	}
     } break;
     default: {
 	fprintf(stderr, "Protocol error: unhandled command '%c' (%d)\n", op, (int) op);

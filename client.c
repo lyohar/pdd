@@ -28,35 +28,10 @@ typedef struct args_t {
     const char* input_file_name;
     int32_t set_max_slot_count;
     int32_t get_max_slot_count;
+    int32_t get_slot_reservation_details;
     char verbose;
 } args_t;
 
-
-static inline int send_all(int sock, const void *data, size_t len)
-{
-    while (len) {
-	ssize_t n = write(sock, data, len);
-	if (n <= 0)
-	    return -1;
-	data += n;
-	len -= n;
-    }    
-    return 0;
-}
-static inline int recv_all(int sock, void *data, size_t len)
-{
-    size_t left = len;
-    while (left) {
-	ssize_t ret = read(sock, data, left);
-        if (!ret)
-	    return 0;
-        if (ret < 0)
-	    return -1;
-	data += ret;
-	left -= ret;
-    }    
-    return 1;
-}
 
 static int send_log_message(int client_sock, const char *message, uint16_t len, int type)
 {
@@ -89,6 +64,31 @@ static int pdd_connect(const args_t *args)
 
     return client_sock;
 }	
+static int register_fname(int client_sock, const char *fname)
+{
+    size_t len = strlen(fname);
+    if (len > 255)
+	len = 255;
+    uint8_t len_u8 = len;
+    char buffer[384];
+    buffer[0] = 'f';
+    memcpy(buffer + 1, &len_u8, 1);
+    memcpy(buffer + 2, fname, len);
+    
+    if (send_all(client_sock, buffer, 2 + len)) {
+        fprintf(stderr, "failed to register filename: %s\n", strerror(errno));
+        return -1;
+    }
+
+    uint8_t response;
+    int ret;
+    if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
+        fprintf(stderr, "failed to get response from server: %s\n", ret ? strerror(errno) : "connection closed by server");
+        return -1;
+    }
+
+    return 0;
+}	
 
 static int set_max_slot_count(const args_t *args)
 {
@@ -109,7 +109,7 @@ static int set_max_slot_count(const args_t *args)
     uint8_t response;
     ssize_t ret;
     if ((ret = recv_all(client_sock, &response, sizeof(uint8_t))) <= 0) {
-        fprintf(stderr, "failed to send configuration request: %s\n", ret ? strerror(errno) : "connection closed by server");
+        fprintf(stderr, "failed to get response from server: %s\n", ret ? strerror(errno) : "connection closed by server");
         return 1;
     }
 
@@ -146,6 +146,48 @@ static int get_max_slot_count(const args_t *args)
 
     return 0;
 }
+static int get_slot_reservation_details(const args_t *args)
+{
+    int client_sock = pdd_connect(args);
+    if (client_sock < 0)
+	return 1;
+
+    char message[1] = {'L'};
+    ssize_t ret;
+    if (send_all(client_sock, message, sizeof(char))) {
+        fprintf(stderr, "failed to send request to server: %s\n", strerror(errno));
+        return 1;
+    }
+    
+    uint32_t response;
+    if ((ret = recv_all(client_sock, &response, sizeof(uint32_t))) <= 0) {
+        fprintf(stderr, "failed to send request to server: %s\n", ret ? strerror(errno) : "connection closed by server");
+        return 1;
+    }
+    uint32_t details_len = ntohl(response);
+    if (!details_len) {
+	printf("Current reserved slots: none\n");
+	return 0;
+    }
+    printf("Current reserved slots:\n");
+    char buffer[65536];
+    while (details_len > 0) {
+	size_t ret;
+	size_t count = (details_len > sizeof(buffer)) ? sizeof(buffer) : details_len;
+	if ((ret = recv_all(client_sock, buffer, count)) <= 0) {
+	    fprintf(stderr, "failed to read from server: %s\n", ret ? strerror(errno) : "connection closed by server");
+	    return 1;
+	}
+	details_len -= count;
+	if (fwrite(buffer, 1, count, stdout) != count) {
+	    fprintf(stderr, "failed to write to stdout: %s\n", strerror(errno));
+	    return 1;
+	}
+    }
+    printf("\n");
+
+    return 0;
+}
 
 static int decompress_file(const args_t *args)
 {
@@ -162,6 +204,9 @@ static int decompress_file(const args_t *args)
 
     int client_sock = pdd_connect(args);
     if (client_sock < 0)
+	return 1;
+
+    if (register_fname(client_sock, args->input_file_name))
 	return 1;
 
     FILE *in = fopen(args->input_file_name, "r");
@@ -348,6 +393,8 @@ static void print_usage(const char *app)
     fprintf(stderr, "       %s -h HOST -p PORT -S MAX_FREE_SLOT_COUNT [-v]\n", app);
     fprintf(stderr, "       or\n");
     fprintf(stderr, "       %s -h HOST -p PORT -G [-v]\n", app);
+    fprintf(stderr, "       or\n");
+    fprintf(stderr, "       %s -h HOST -p PORT -L [-v]\n", app);
     fprintf(stderr, "\n");
     fprintf(stderr, "  -h HOST                        set host to connect to\n");
     fprintf(stderr, "  -p PORT                        set port to connect to\n");
@@ -359,6 +406,7 @@ static void print_usage(const char *app)
     fprintf(stderr, "\n");
     fprintf(stderr, "  -S MAX_FREE_SLOT_COUNT         set max free slot count and exit\n");
     fprintf(stderr, "  -G                             get and print max free slot count and exit\n");
+    fprintf(stderr, "  -L                             get and print detailed slot reservation info and exit\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  -v                             turn on verbose mode\n");
 }
@@ -374,12 +422,13 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     args->force_reading_file = 0;
     args->set_max_slot_count = -1;
     args->get_max_slot_count = -1;
+    args->get_slot_reservation_details = -1;
     args->verbose = 0;
 
     opterr = 0;
     int int_value;
     int opt;
-    while ((opt = getopt(argc, argv, "h:p:f:r:d:t:eS:Gv")) != -1) {
+    while ((opt = getopt(argc, argv, "h:p:f:r:d:t:eS:GLv")) != -1) {
         switch (opt) {
 	case 'h':
 	    args->host = optarg;
@@ -426,6 +475,9 @@ static int parse_arguments(args_t *args, int argc, char **argv)
 	case 'G':
 	    args->get_max_slot_count = 1;
 	    break;
+	case 'L':
+	    args->get_slot_reservation_details = 1;
+	    break;
 	case 'v':
 	    args->verbose = 1;
 	    break;
@@ -449,7 +501,8 @@ static int parse_arguments(args_t *args, int argc, char **argv)
     }
 
     if (args->set_max_slot_count < 0 &&
-	args->get_max_slot_count < 0) {
+	args->get_max_slot_count < 0 &&
+	args->get_slot_reservation_details < 0) {
 	if (!args->input_file_name) {
 	    fprintf(stderr, "Missing mandatory input filename option\n");
 	    return -1;
@@ -478,6 +531,8 @@ int main(int argc, char** argv)
 	return set_max_slot_count(&args);
     if (args.get_max_slot_count >= 0)
 	return get_max_slot_count(&args);
+    if (args.get_slot_reservation_details >= 0)
+	return get_slot_reservation_details(&args);
 
     return decompress_file(&args);
 }
