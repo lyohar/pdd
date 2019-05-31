@@ -134,14 +134,16 @@ static int get_max_slot_count(const args_t *args)
         return 1;
     }
     
-    uint32_t response;
-    if ((ret = recv_all(client_sock, &response, sizeof(uint32_t))) <= 0) {
+    uint32_t response[2];
+    if ((ret = recv_all(client_sock, &response, sizeof(uint32_t[2]))) <= 0) {
         fprintf(stderr, "failed to send configuration request: %s\n", ret ? strerror(errno) : "connection closed by server");
         return 1;
     }
-    response = ntohl(response);
+    uint32_t max_free_slots = ntohl(response[0]);
+    uint32_t free_slots = ntohl(response[1]);
 
-    fprintf(stderr, "Maximum slot count at server is %u\n", response);
+    fprintf(stderr, "Currently %u slots of total %u are available at server\n", max_free_slots, free_slots);
+
     return 0;
 }
 

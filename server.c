@@ -517,8 +517,11 @@ static void service_handle_input(service_t *service, client_t *client)
     case 'G': {
 	client_remove_messaage(client, sizeof(char));
 
-	uint32_t response = htonl(service->max_free_slots);
-	if (write(client->fd, &response, sizeof(uint32_t)) != sizeof(uint32_t)) {
+	uint32_t response[2] = {
+	    htonl(service->max_free_slots),
+	    htonl(service->free_slots),
+	};
+	if (write(client->fd, &response, sizeof(uint32_t[2])) != sizeof(uint32_t[2])) {
 	    fprintf(stderr, "Failed to write to socket: %s\n", ((errno == EAGAIN) ? "write buffer overflow" : strerror(errno)));
 	    service_drop_client(service, client);
 	}
