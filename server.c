@@ -289,7 +289,7 @@ static char *service_build_reservation_state(service_t *service, size_t *reserva
     if (!state_len) {
 	free(state);
 	return NULL;
-    }	
+    }
     if (state_len != state_reserved)
 	state = realloc(state, state_len);
     *reservation_state_len = state_len;
@@ -542,6 +542,7 @@ static void service_handle_input(service_t *service, client_t *client)
 		    /* Arming timeout */
 		    if (service->verbose)
 			fprintf(stderr, "Arming declining slot on timeout\n");
+		    service_log_slot_event(service, client, "requested", 0);
 		    struct itimerspec its = {
 			.it_interval = {
 			    .tv_sec = 0,
