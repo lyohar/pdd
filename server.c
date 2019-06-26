@@ -118,6 +118,7 @@ static void service_log_slot_event(service_t *service, client_t *client, const c
 	tm_buffer[strftime(tm_buffer, sizeof(tm_buffer) - 1, "%F %T", &now_tm)] = '\0';
 
     char duration[128];
+    *duration = '\0';
     if (released)
 	get_duration(duration, client, &now);
     fprintf(service->slot_event_log_fh, "%s.%09d|%s|%s|%s|%d\n",
@@ -489,7 +490,7 @@ static void service_handle_input(service_t *service, client_t *client)
     case 'l':
     case 'e': {
 	if (client->buffer_off >= (sizeof(char) + sizeof(uint16_t))) {
-	    uint32_t len;
+	    uint16_t len;
 	    memcpy(&len, client->buffer + sizeof(char), sizeof(uint16_t));
 	    len = ntohs(len);
 	    if (len <= CLIENT_MESSAGE_SIZE) {
