@@ -142,7 +142,7 @@ static int get_max_slot_count(const args_t *args)
     uint32_t max_free_slots = ntohl(response[0]);
     uint32_t free_slots = ntohl(response[1]);
 
-    fprintf(stderr, "Currently %u slots of total %u are available at server\n", max_free_slots, free_slots);
+    fprintf(stderr, "Currently %u slots of total %u are available at server\n", free_slots, max_free_slots);
 
     return 0;
 }
